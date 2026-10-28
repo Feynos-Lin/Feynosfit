@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -300,4 +301,62 @@ func TestPanelPasswordChangeAndCLIReset(t *testing.T) {
 	if !strings.Contains(body, "Set up the admin panel") {
 		t.Fatal("reset must sign the panel out")
 	}
+}
+
+func TestPanelFoodSearch(t *testing.T) {
+	p := newPTC(t)
+	var blocked atomic.Bool
+	var calls atomic.Int32
+	fs := fakeFatSecret(t, &blocked, &calls)
+	p.api.food.tokenURL, p.api.food.apiURL = fs.URL+"/token", fs.URL+"/api"
+	p.setup()
+
+	_, body := p.get("/settings")
+	if !strings.Contains(body, "Fast-food search (FatSecret)") || !strings.Contains(body, `class="pill off">Off`) {
+		t.Fatal("food card missing or not off")
+	}
+	// Missing secret is refused.
+	_, body = p.post("/food/save", url.Values{"csrf": {p.csrf()}, "id": {"cid"}})
+	if !strings.Contains(body, "Enter both the client ID") {
+		t.Fatal("expected keys error")
+	}
+	// No CSRF token: refused.
+	p.post("/food/save", url.Values{"id": {"cid"}, "secret": {"csecret"}})
+	if p.api.food.Enabled() {
+		t.Fatal("saved without CSRF")
+	}
+	_, body = p.post("/food/save", url.Values{"csrf": {p.csrf()}, "id": {"cid"}, "secret": {"csecret"}})
+	if !strings.Contains(body, "FatSecret keys saved") || strings.Contains(body, "csecret") {
+		t.Fatal("save failed, or the secret was echoed back")
+	}
+	// Changing only the ID keeps the saved secret.
+	p.post("/food/save", url.Values{"csrf": {p.csrf()}, "id": {"cid"}, "secret": {""}})
+	if !p.api.food.Enabled() {
+		t.Fatal("secret lost")
+	}
+	_, body = p.post("/food/test", url.Values{"csrf": {p.csrf()}})
+	if !strings.Contains(body, "It works") || !strings.Contains(body, "Big Mac") {
+		t.Fatalf("test failed: %s", between(body, "FatSecret)", "</form>"))
+	}
+	blocked.Store(true)
+	_, body = p.post("/food/test", url.Values{"csrf": {p.csrf()}})
+	if !strings.Contains(body, "203.0.113.9") || !strings.Contains(body, "Problem") {
+		t.Fatalf("expected IP error: %s", between(body, "FatSecret)", "</form>"))
+	}
+	_, body = p.post("/food/remove", url.Values{"csrf": {p.csrf()}})
+	if !strings.Contains(body, "keys removed") || p.api.food.Enabled() {
+		t.Fatal("remove failed")
+	}
+}
+
+func between(s, a, b string) string {
+	i := strings.Index(s, a)
+	if i < 0 {
+		return s
+	}
+	s = s[i:]
+	if j := strings.Index(s, b); j >= 0 {
+		return s[:j]
+	}
+	return s
 }

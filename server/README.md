@@ -104,6 +104,7 @@ From the panel you can:
 - rename people, reset their password (the new one is shown once), sign them out of all
   devices, or delete them
 - see and delete challenges and their leaderboards
+- set up fast-food search (FatSecret keys)
 - change the admin password and download a backup
 
 How it's protected:
@@ -125,6 +126,31 @@ Over Tailscale the connection is encrypted anyway.
 Forgot the admin password? `docker exec feynos-fit-server /feynos-server reset-admin-password`
 prints a new setup code. Don't want the panel? Set `ADMIN_PANEL_ADDR: "off"` and remove the
 `8097` port line.
+
+## Fast-food search (FatSecret)
+
+Open Food Facts, which the app uses for packaged foods, has very few restaurant items. Your
+server can add restaurant chains and brands from FatSecret. The server makes the requests, so
+the secret key never goes into the app, and everyone signed in to your server gets it.
+
+1. Sign up at [platform.fatsecret.com](https://platform.fatsecret.com) (the free Basic plan is
+   enough) and create an app. Copy its **OAuth 2.0 Client ID** and **Client Secret**.
+2. In your FatSecret account, open **IP Restrictions** and add your home internet's public IP
+   address (search "what is my IP" from a device at home). FatSecret refuses every other address.
+   Changes can take a while to apply.
+3. In the web admin panel, open **Settings → Fast-food search**, paste both keys, press
+   **Save**, then **Test**. If it fails because of the IP address, the message shows the
+   address FatSecret saw.
+
+In the app, food search then shows a **Restaurants & brands** section above the packaged foods.
+Results are cached on the server for 24 hours, and each person is limited to 120 searches
+per 10 minutes so the free plan's daily limit isn't used up.
+
+If your home IP changes (most home internet does now and then), search will stop working until
+you add the new address in FatSecret. The admin panel shows the error.
+
+You can also set the keys with `FATSECRET_CLIENT_ID` and `FATSECRET_CLIENT_SECRET` in the compose
+file. They take priority over the panel.
 
 ## Admin commands
 

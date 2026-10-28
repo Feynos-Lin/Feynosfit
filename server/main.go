@@ -23,7 +23,7 @@ import (
 	"time"
 )
 
-var version = "1.1.0"
+var version = "1.2.0"
 
 const adminAddr = "127.0.0.1:8096" // reachable only from inside the container
 
@@ -165,6 +165,7 @@ func serve() error {
 				api.authIP.Sweep()
 				api.failUser.Sweep()
 				api.friendIP.Sweep()
+				api.foodUser.Sweep()
 			case <-stop:
 				return
 			}

@@ -230,6 +230,30 @@ details[open] > summary { margin-bottom: 8px; }
 {{else if eq .Page "settings"}}
   <h1>Settings</h1>
   <div class="card">
+    <div class="row spread">
+      <h2 style="margin:0">Fast-food search (FatSecret)</h2>
+      {{if not .FoodHasSecret}}<span class="pill off">Off</span>{{else if .FoodLastErr}}{{if .FoodLastOK.After .FoodErrAt}}<span class="pill">Working</span>{{else}}<span class="pill off">Problem</span>{{end}}{{else}}<span class="pill">On</span>{{end}}
+    </div>
+    <p class="dim small">Lets the app search restaurant chains and brands through this server, so your FatSecret secret never leaves it. Get free keys at platform.fatsecret.com, and add this server's public IP address under IP Restrictions there.</p>
+    {{if .FoodTest}}<div class="flash{{if not .FoodTestOK}} bad{{end}}">{{.FoodTest}}</div>{{end}}
+    {{if and .FoodLastErr (not .FoodTest)}}{{if .FoodErrAt.After .FoodLastOK}}<p class="small"><b>Last error</b> ({{ago .FoodErrAt}}): {{.FoodLastErr}}</p>{{end}}{{end}}
+    {{if .FoodFromEnv}}
+      <p class="small">Keys are set in the compose file (FATSECRET_CLIENT_ID / FATSECRET_CLIENT_SECRET). Client ID: <span class="code">{{.FoodID}}</span></p>
+      <form class="inline" method="post" action="/food/test"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Test</button></form>
+    {{else}}
+    <form method="post" action="/food/save" style="display:grid;gap:10px;max-width:420px"><input type="hidden" name="csrf" value="{{.CSRF}}">
+      <input type="text" name="id" placeholder="Client ID" value="{{.FoodID}}" required autocomplete="off" spellcheck="false">
+      <input type="password" name="secret" placeholder="{{if .FoodHasSecret}}Client secret (saved, leave blank to keep){{else}}Client secret{{end}}" {{if not .FoodHasSecret}}required{{end}} autocomplete="off">
+      <div><button>Save</button></div>
+    </form>
+    {{if .FoodHasSecret}}
+    <div class="row" style="margin-top:10px">
+      <form class="inline" method="post" action="/food/test"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="ghost">Test</button></form>
+      <form class="inline" method="post" action="/food/remove"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="ghost">Remove keys</button></form>
+    </div>
+    {{end}}{{end}}
+  </div>
+  <div class="card">
     <h2>Admin password</h2>
     <form method="post" action="/settings/password" style="display:grid;gap:10px;max-width:380px"><input type="hidden" name="csrf" value="{{.CSRF}}">
       <input type="password" name="current" placeholder="Current password" required autocomplete="current-password">
@@ -240,7 +264,7 @@ details[open] > summary { margin-bottom: 8px; }
   </div>
   <div class="card">
     <h2>Backup</h2>
-    <p class="dim small">Downloads every account, friendship, step total and challenge as one file. It contains password hashes, so store it somewhere private.</p>
+    <p class="dim small">Downloads every account, friendship, step total and challenge as one file. It contains password hashes and your FatSecret secret, so store it somewhere private.</p>
     <a class="btn ghost" href="/backup">Download backup</a>
   </div>
   <div class="card">

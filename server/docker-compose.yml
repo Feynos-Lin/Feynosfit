@@ -31,6 +31,9 @@ services:
       ALLOW_SIGNUP: "true"
       # Optional: choose the invite code yourself instead of a random one.
       # SIGNUP_CODE: "my-secret-invite"
+      # Fast-food search keys (or paste them on the admin panel's Settings page):
+      # FATSECRET_CLIENT_ID: ""
+      # FATSECRET_CLIENT_SECRET: ""
       # Time zone for "today" in the admin panel.
       TZ: "America/Denver"
     volumes:

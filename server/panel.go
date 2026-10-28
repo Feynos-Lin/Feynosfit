@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -44,6 +45,9 @@ type Panel struct {
 	fails    *limiter                 // failed logins per IP
 	failsAll *limiter                 // failed logins overall
 	tmpl     *template.Template
+
+	foodTest   string // result of the last "Test" press, shown once
+	foodTestOK bool
 }
 
 func NewPanel(store *Store, api *API, dataPath string, allowPublic bool) *Panel {
@@ -105,6 +109,9 @@ func (p *Panel) Routes() http.Handler {
 	m.HandleFunc("POST /challenges/delete", p.authed(p.deleteChallenge))
 	m.HandleFunc("POST /settings/password", p.authed(p.changePassword))
 	m.HandleFunc("GET /backup", p.authed(p.backup))
+	m.HandleFunc("POST /food/save", p.authed(p.saveFood))
+	m.HandleFunc("POST /food/test", p.authed(p.testFood))
+	m.HandleFunc("POST /food/remove", p.authed(p.removeFood))
 	return p.guard(m)
 }
 
@@ -235,6 +242,15 @@ type pageData struct {
 	Today       string
 	Zone        string
 	PublicURL   string
+
+	FoodID        string
+	FoodHasSecret bool
+	FoodFromEnv   bool
+	FoodLastOK    time.Time
+	FoodLastErr   string
+	FoodErrAt     time.Time
+	FoodTest      string
+	FoodTestOK    bool
 }
 
 var flashes = map[string]string{
@@ -249,16 +265,20 @@ var flashes = map[string]string{
 	"deleted":   "Account and all of its data deleted.",
 	"chdeleted": "Challenge deleted.",
 	"pw":        "Admin password changed. Other admin sessions were signed out.",
+	"foodsaved": "FatSecret keys saved. Press Test to check they work.",
+	"foodgone":  "FatSecret keys removed. Fast-food search is off.",
+	"foodtest":  "",
 }
 
 var flashErrors = map[string]string{
-	"badcode": "Invite codes must be 6–32 letters or numbers.",
-	"badname": "Display names must be 1–40 characters.",
-	"nouser":  "That account no longer exists.",
-	"confirm": "Tick the confirmation box first.",
-	"pwwrong": "Your current admin password is wrong.",
-	"pwshort": "Use at least 10 characters for the admin password.",
-	"pwmatch": "The two new passwords don't match.",
+	"badcode":  "Invite codes must be 6–32 letters or numbers.",
+	"badname":  "Display names must be 1–40 characters.",
+	"nouser":   "That account no longer exists.",
+	"confirm":  "Tick the confirmation box first.",
+	"pwwrong":  "Your current admin password is wrong.",
+	"pwshort":  "Use at least 10 characters for the admin password.",
+	"pwmatch":  "The two new passwords don't match.",
+	"foodkeys": "Enter both the client ID and the client secret.",
 }
 
 func (p *Panel) build(r *http.Request, page string, s *panelSession) pageData {
@@ -275,6 +295,14 @@ func (p *Panel) build(r *http.Request, page string, s *panelSession) pageData {
 		return pd
 	}
 	pd.LoggedIn, pd.CSRF = true, s.csrf
+	fid, fsecret, fenv := p.api.food.creds()
+	pd.FoodID, pd.FoodHasSecret, pd.FoodFromEnv = fid, fsecret != "", fenv
+	pd.FoodLastOK, pd.FoodLastErr, pd.FoodErrAt = p.api.food.Status()
+	if r.URL.Query().Get("m") == "foodtest" {
+		p.mu.Lock()
+		pd.FoodTest, pd.FoodTestOK = p.foodTest, p.foodTestOK
+		p.mu.Unlock()
+	}
 	pd.SignupOpen = p.api.signupOpen()
 	today := pd.Today
 	t, _ := parseDate(today)
@@ -631,6 +659,64 @@ func (p *Panel) backup(w http.ResponseWriter, r *http.Request, _ *panelSession) 
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="feynos-fit-server-%s.json"`, p.now().Format("2006-01-02")))
 	_, _ = w.Write(b)
 	log.Printf("admin: backup downloaded")
+}
+
+func (p *Panel) saveFood(w http.ResponseWriter, r *http.Request, _ *panelSession) {
+	id := strings.TrimSpace(r.PostFormValue("id"))
+	secret := strings.TrimSpace(r.PostFormValue("secret"))
+	var had string
+	p.store.Read(func(d *Data) { had = d.FatSecretSecret })
+	if secret == "" {
+		secret = had // keep the saved secret when only the ID changes
+	}
+	if id == "" || secret == "" || len(id) > 200 || len(secret) > 200 {
+		back(w, r, "/settings", "foodkeys")
+		return
+	}
+	_ = p.store.Write(func(d *Data) error { d.FatSecretID, d.FatSecretSecret = id, secret; return nil })
+	p.api.food.Forget()
+	log.Printf("admin: FatSecret keys saved")
+	back(w, r, "/settings", "foodsaved")
+}
+
+func (p *Panel) removeFood(w http.ResponseWriter, r *http.Request, _ *panelSession) {
+	_ = p.store.Write(func(d *Data) error { d.FatSecretID, d.FatSecretSecret = "", ""; return nil })
+	p.api.food.Forget()
+	log.Printf("admin: FatSecret keys removed")
+	back(w, r, "/settings", "foodgone")
+}
+
+func (p *Panel) testFood(w http.ResponseWriter, r *http.Request, _ *panelSession) {
+	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+	f := p.api.food
+	var msg string
+	ok := false
+	if !f.Enabled() {
+		msg = "Enter your FatSecret client ID and secret first."
+	} else if hits, err := f.search(ctx, "big mac"); err != nil {
+		f.mu.Lock()
+		f.lastErr, f.lastErrT = err.Error(), f.now()
+		f.mu.Unlock()
+		msg = err.Error()
+		if ip := publicIP(ctx); ip != "" {
+			msg += fmt.Sprintf(". This server's public IP address is %s — make sure it's listed under IP Restrictions in your FatSecret account (changes can take up to 24 hours to apply).", ip)
+		}
+	} else {
+		f.mu.Lock()
+		f.lastOK = f.now()
+		f.mu.Unlock()
+		ok = true
+		msg = fmt.Sprintf("It works: a search for \"big mac\" found %d foods.", len(hits))
+		if len(hits) > 0 {
+			h := hits[0]
+			msg += fmt.Sprintf(" First result: %s%s, per %s: %.0f kcal.", h.Name, map[bool]string{true: " (" + h.Brand + ")", false: ""}[h.Brand != ""], h.Serving, h.Kcal)
+		}
+	}
+	p.mu.Lock()
+	p.foodTest, p.foodTestOK = msg, ok
+	p.mu.Unlock()
+	back(w, r, "/settings", "foodtest")
 }
 
 // ---------------------------------------------------------------- formatting

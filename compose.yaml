@@ -29,6 +29,9 @@ services:
       ALLOW_SIGNUP: "true"  # or open/close sign-ups from the admin panel
       TZ: "America/Denver"
       # SIGNUP_CODE: "my-secret-invite"
+      # Fast-food search keys. Easier: paste them on the admin panel's Settings page instead.
+      # FATSECRET_CLIENT_ID: ""
+      # FATSECRET_CLIENT_SECRET: ""
     volumes:
       - feynos-fit-data:/data
     read_only: true

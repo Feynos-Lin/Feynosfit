@@ -18,7 +18,7 @@ permissions:
   contents: write
 
 env:
-  APP_VERSION: "0.6.1"
+  APP_VERSION: "0.7"
 
 jobs:
   build:
@@ -81,7 +81,7 @@ jobs:
                   minSdk = 26
                   targetSdk = 34
                   versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-                  versionName = System.getenv("APP_VERSION") ?: "0.6.1"
+                  versionName = System.getenv("APP_VERSION") ?: "0.7"
               }
 
               signingConfigs {
@@ -3257,6 +3257,44 @@ jobs:
                   authed(ctx, "DELETE", "/challenges/${enc(id)}")
               }
 
+              // ---------------------------------------------------------------- food search
+
+              /**
+               * Restaurant and brand foods from FatSecret, looked up by the server (which holds the key).
+               * Returns null when you're not signed in or the server doesn't have food search set up.
+               */
+              fun searchFoods(ctx: Context, query: String): List<Food>? {
+                  if (session(ctx) == null) return null
+                  val text = try {
+                      authed(ctx, "GET", "/foods/search?q=${enc(query)}")
+                  } catch (e: ApiException) {
+                      if (e.status == 503 || e.status == 404 || e.status == 401) return null // off, or an older server
+                      throw e
+                  }
+                  val arr = JSONObject(text).optJSONArray("foods") ?: return emptyList()
+                  val out = ArrayList<Food>()
+                  for (i in 0 until arr.length()) {
+                      val o = arr.optJSONObject(i) ?: continue
+                      val name = o.optString("name").trim()
+                      val kcal = o.optDouble("kcal", 0.0).safe()
+                      val protein = o.optDouble("protein", 0.0).safe()
+                      val carbs = o.optDouble("carbs", 0.0).safe()
+                      val fat = o.optDouble("fat", 0.0).safe()
+                      if (name.isEmpty() || kcal + protein + carbs + fat <= 0) continue
+                      out.add(
+                          Food(
+                              name = name,
+                              brand = o.optString("brand").trim(),
+                              servingDesc = o.optString("serving").trim().ifEmpty { "1 serving" },
+                              servingGrams = o.optDouble("grams", 0.0).safe(),
+                              n = Nutrients(kcal = kcal, protein = protein, carbs = carbs, fat = fat),
+                              source = "fatsecret",
+                          ),
+                      )
+                  }
+                  return out
+              }
+
               private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
           }
           FEYNOS_EOF
@@ -3667,6 +3705,7 @@ jobs:
           import com.feynos.fit.data.FoodDb
           import com.feynos.fit.data.Nutrients
           import com.feynos.fit.data.ScaleManager
+          import com.feynos.fit.data.Social
           import com.feynos.fit.data.Store
           import com.feynos.fit.data.f0
           import com.feynos.fit.data.f1
@@ -3677,6 +3716,7 @@ jobs:
           import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
           import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
           import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.async
           import kotlinx.coroutines.launch
           import kotlinx.coroutines.withContext
 
@@ -3719,6 +3759,7 @@ jobs:
               var query by rememberSaveable { mutableStateOf("") }
               var tab by rememberSaveable { mutableIntStateOf(0) }
               var online by remember { mutableStateOf<List<Food>>(emptyList()) }
+              var restaurants by remember { mutableStateOf<List<Food>>(emptyList()) }
               var loading by remember { mutableStateOf(false) }
               var errorMsg by remember { mutableStateOf<String?>(null) }
               var selected by remember { mutableStateOf<Food?>(null) }
@@ -3731,13 +3772,24 @@ jobs:
                   loading = true
                   errorMsg = null
                   scope.launch {
-                      val r = withContext(Dispatchers.IO) { runCatching { FoodApi.search(q) } }
+                      // Open Food Facts (packaged foods) and, through your Feynos Fit server, FatSecret
+                      // (restaurants and brands) are searched at the same time.
+                      val off = async(Dispatchers.IO) { runCatching { FoodApi.search(q) } }
+                      val fs = async(Dispatchers.IO) { runCatching { Social.searchFoods(ctx, q) } }
+                      val r = off.await()
+                      val f = fs.await()
                       loading = false
-                      r.onSuccess {
-                          online = it
-                          if (it.isEmpty()) errorMsg = "No online results for \"$q\". Try fewer words, or create the food yourself."
-                      }.onFailure {
-                          errorMsg = "Couldn't reach the food database. Check your connection and try again."
+                      online = r.getOrNull() ?: emptyList()
+                      restaurants = f.getOrNull() ?: emptyList()
+                      val fsOn = f.isFailure || f.getOrNull() != null
+                      errorMsg = when {
+                          online.isNotEmpty() || restaurants.isNotEmpty() -> when {
+                              r.isFailure -> "Couldn't reach Open Food Facts, so packaged-food results are missing."
+                              f.isFailure -> "Restaurant search isn't working right now: ${f.exceptionOrNull()?.message ?: "server error"}"
+                              else -> null
+                          }
+                          r.isFailure && (!fsOn || f.isFailure) -> "Couldn't reach the food database. Check your connection and try again."
+                          else -> "No online results for \"$q\". Try fewer words, or create the food yourself."
                       }
                   }
               }
@@ -3839,8 +3891,12 @@ jobs:
                                           item { ListHeader("Your foods") }
                                           items(mine) { f -> FoodRow(f) { selected = f } }
                                       }
+                                      if (restaurants.isNotEmpty()) {
+                                          item { ListHeader("Restaurants & brands · Powered by fatsecret") }
+                                          items(restaurants) { f -> FoodRow(f) { selected = f } }
+                                      }
                                       if (online.isNotEmpty()) {
-                                          item { ListHeader("Online results · Open Food Facts") }
+                                          item { ListHeader("Packaged foods · Open Food Facts") }
                                           items(online) { f -> FoodRow(f) { selected = f } }
                                       }
                                       val common = FoodDb.foods.filter { match(it) }
