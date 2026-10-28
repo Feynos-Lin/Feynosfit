@@ -9,7 +9,26 @@ totals, and challenges. Food, weight and health data never leave the phone.
 
 ## 1. Start it
 
-On your server (needs Docker with the compose plugin):
+### Windows (PowerShell, no Git needed)
+
+Needs Docker Desktop. Run one line at a time:
+
+```powershell
+cd $HOME
+Invoke-WebRequest https://github.com/Feynos-Lin/Feynosfit/archive/refs/heads/main.zip -OutFile Feynosfit.zip
+Expand-Archive Feynosfit.zip -DestinationPath . -Force
+cd Feynosfit-main\server
+docker compose up -d --build
+docker exec feynos-fit-server /feynos-server signup-code
+docker exec feynos-fit-server /feynos-server admin-setup-code
+```
+
+To update later, run the same lines again. Your data lives in a Docker volume, so
+re-downloading the files doesn't touch it.
+
+### Linux / macOS
+
+Needs Docker with the compose plugin:
 
 ```sh
 git clone https://github.com/Feynos-Lin/Feynosfit.git
@@ -54,6 +73,8 @@ After that, add each other with the 8-character friend codes shown in the app.
 ## Web admin panel
 
 Open `http://<your-server's-LAN-IP>:8097` from a phone or computer on your home network.
+(On Windows, `ipconfig` shows the IP as "IPv4 Address". If your phone can't reach it, allow
+port 8097 for private networks in Windows Defender Firewall.)
 
 The first time, it asks for a one-time **setup code** and lets you create the admin password:
 
@@ -104,6 +125,8 @@ Once everyone has joined, close sign-ups with the switch in the web admin panel 
 used the panel's switch, it takes priority over `ALLOW_SIGNUP`.
 
 ## Update
+
+Windows: repeat the PowerShell lines in step 1. Linux / macOS:
 
 ```sh
 cd Feynosfit && git pull && cd server && docker compose up -d --build
