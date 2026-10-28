@@ -61,6 +61,11 @@ type Data struct {
 	Sessions    map[string]*Session    `json:"sessions"` // key: sha256(token) hex
 	Friendships map[string]*Friendship `json:"friendships"`
 	Challenges  map[string]*Challenge  `json:"challenges"`
+
+	// Web admin panel
+	AdminPassHash  string `json:"adminPassHash,omitempty"`
+	AdminSetupCode string `json:"adminSetupCode,omitempty"` // needed once, to create the admin password
+	SignupOpen     *bool  `json:"signupOpen,omitempty"`     // set from the panel; overrides ALLOW_SIGNUP
 }
 
 type Store struct {

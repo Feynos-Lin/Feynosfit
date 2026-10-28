@@ -165,6 +165,17 @@ func (a *API) auth(next authed) http.HandlerFunc {
 	}
 }
 
+// signupOpen: the admin panel's switch if it has been used, otherwise ALLOW_SIGNUP.
+func (a *API) signupOpen() bool {
+	open := a.cfg.AllowSignup
+	a.store.Read(func(d *Data) {
+		if d.SignupOpen != nil {
+			open = *d.SignupOpen
+		}
+	})
+	return open
+}
+
 // ---------------------------------------------------------------- validation
 
 var usernameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{2,31}$`)
@@ -248,7 +259,7 @@ func sumSteps(u *User, start, end string) int {
 // ---------------------------------------------------------------- handlers: account
 
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "feynos-fit", "version": version, "signup": a.cfg.AllowSignup})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "feynos-fit", "version": version, "signup": a.signupOpen()})
 }
 
 type authResponse struct {
@@ -273,7 +284,7 @@ func (a *API) register(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, fail(http.StatusTooManyRequests, "Too many attempts. Try again in a few minutes."))
 		return
 	}
-	if !a.cfg.AllowSignup {
+	if !a.signupOpen() {
 		writeErr(w, fail(http.StatusForbidden, "New sign-ups are turned off on this server"))
 		return
 	}

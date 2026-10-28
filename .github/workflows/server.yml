@@ -50,6 +50,8 @@ jobs:
           docker compose restart
           sleep 3
           docker exec feynos-fit-server /feynos-server users | grep ci-user   # data survived restart
+          curl -fsS http://127.0.0.1:8097/ | grep -q "Set up the admin panel"   # admin panel is up
+          docker exec feynos-fit-server /feynos-server admin-setup-code | grep -q "Setup code:"
           echo "Container OK"
 
       - name: Logs

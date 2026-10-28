@@ -3,6 +3,7 @@
 #   docker compose up -d --build                              # start / update
 #   docker exec feynos-fit-server /feynos-server signup-code  # invite code for new accounts
 #   docker logs feynos-fit-server                             # logs
+#   http://<server-ip>:8097                                   # web admin panel (home network only)
 #
 # Put HTTPS in front of it (Cloudflare Tunnel, your reverse proxy, or `tailscale serve`).
 # The app refuses plain http:// addresses.
@@ -18,6 +19,10 @@ services:
       # http://127.0.0.1:8095. If your proxy runs in Docker on its own network, remove
       # this and attach both containers to the same network instead (see README).
       - "127.0.0.1:8095:8095"
+      # Web admin panel. Reachable from your home network; it refuses public internet
+      # addresses and needs a password. Do NOT port-forward 8097 or route it through
+      # your tunnel/proxy. To allow only this machine: "127.0.0.1:8097:8097".
+      - "8097:8097"
     environment:
       # Use the client IP your proxy forwards, so rate limits apply per person.
       # Only safe because the port above isn't exposed to the network directly.
@@ -26,6 +31,8 @@ services:
       ALLOW_SIGNUP: "true"
       # Optional: choose the invite code yourself instead of a random one.
       # SIGNUP_CODE: "my-secret-invite"
+      # Time zone for "today" in the admin panel.
+      TZ: "America/Denver"
     volumes:
       - feynos-fit-data:/data
     read_only: true

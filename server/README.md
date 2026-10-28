@@ -51,6 +51,45 @@ In Feynos Fit, open the **Friends** tab, enter your server address and the invit
 and create an account. Share the same address and invite code with your friends.
 After that, add each other with the 8-character friend codes shown in the app.
 
+## Web admin panel
+
+Open `http://<your-server's-LAN-IP>:8097` from a phone or computer on your home network.
+
+The first time, it asks for a one-time **setup code** and lets you create the admin password:
+
+```sh
+docker exec feynos-fit-server /feynos-server admin-setup-code
+```
+
+From the panel you can:
+
+- see accounts, who synced recently, and friendships/challenge counts
+- open or close sign-ups, and show, rotate or choose the invite code
+- rename people, reset their password (the new one is shown once), sign them out of all
+  devices, or delete them
+- see and delete challenges and their leaderboards
+- change the admin password and download a backup
+
+How it's protected:
+
+- It runs on its own port (8097) that never goes through your tunnel or reverse proxy, so
+  it isn't reachable from the app's public address.
+- It refuses any client that isn't on a private network (home LAN, Tailscale, or the
+  machine itself), even if the port is accidentally forwarded. Proxy headers are ignored.
+- It needs the admin password: 10+ characters, with a 15-minute lockout after 8 wrong tries.
+  First-time setup needs the code from your server, so nobody else on your Wi-Fi can
+  claim it first.
+- Sessions use HttpOnly, SameSite=Strict cookies and expire after 12 hours. Every form has
+  a CSRF token, and cross-site form posts are refused.
+- There's no JavaScript, and the panel never loads anything from outside the server.
+
+On a plain home network the panel uses `http://`, so only open it on networks you trust.
+Over Tailscale the connection is encrypted anyway.
+
+Forgot the admin password? `docker exec feynos-fit-server /feynos-server reset-admin-password`
+prints a new setup code. Don't want the panel? Set `ADMIN_PANEL_ADDR: "off"` and remove the
+`8097` port line.
+
 ## Admin commands
 
 ```sh
@@ -60,8 +99,9 @@ docker exec feynos-fit-server /feynos-server delete-user <name>     # remove acc
 docker exec feynos-fit-server /feynos-server new-signup-code        # rotate the invite code
 ```
 
-Once everyone has joined, set `ALLOW_SIGNUP: "false"` in `docker-compose.yml` and run
-`docker compose up -d` to close sign-ups.
+Once everyone has joined, close sign-ups with the switch in the web admin panel (or set
+`ALLOW_SIGNUP: "false"` in `docker-compose.yml` and run `docker compose up -d`). Once you've
+used the panel's switch, it takes priority over `ALLOW_SIGNUP`.
 
 ## Update
 
@@ -88,6 +128,6 @@ docker cp feynos-fit-server:/data/feynos-fit.json ./feynos-fit-backup.json
 - Friends see only each other's step totals, and only after both sides accept. Challenge
   leaderboards show only members who chose to join.
 - The container runs as a non-root user on a read-only filesystem with all Linux
-  capabilities dropped. The admin interface listens only inside the container.
-- There's no web admin panel and no third-party code to keep patched. Keep Docker and
-  your proxy/tunnel up to date.
+  capabilities dropped. The command-line admin interface listens only inside the container.
+- The web admin panel is home-network-only (see above). There's no third-party code to
+  keep patched; keep Docker and your proxy/tunnel up to date.

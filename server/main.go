@@ -23,7 +23,7 @@ import (
 	"time"
 )
 
-var version = "1.0.0"
+var version = "1.1.0"
 
 const adminAddr = "127.0.0.1:8096" // reachable only from inside the container
 
@@ -58,7 +58,7 @@ func main() {
 		err = healthcheck()
 	case "version":
 		fmt.Println(version)
-	case "signup-code", "users", "reset-password", "delete-user", "new-signup-code":
+	case "signup-code", "users", "reset-password", "delete-user", "new-signup-code", "admin-setup-code", "reset-admin-password":
 		err = adminCommand(cmd, os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
@@ -81,6 +81,8 @@ Commands (run with: docker exec feynos-fit-server /feynos-server <command>):
   users                    list accounts
   reset-password <user>    set a new random password and sign the user out everywhere
   delete-user <user>       delete an account and all of its data
+  admin-setup-code         one-time code for creating the web admin password
+  reset-admin-password     forget the web admin password so it can be set up again
   version                  show the server version
 `)
 }
@@ -103,6 +105,9 @@ func serve() error {
 			d.SignupCode = c
 		} else if d.SignupCode == "" {
 			d.SignupCode = randomCode(10)
+		}
+		if d.AdminPassHash == "" && d.AdminSetupCode == "" {
+			d.AdminSetupCode = randomCode(8)
 		}
 		d.prune(time.Now())
 		return nil
@@ -132,6 +137,22 @@ func serve() error {
 	}
 	admin := &http.Server{Addr: adminAddr, Handler: adminRoutes(store, adminToken), ReadHeaderTimeout: 5 * time.Second}
 
+	// Web admin panel on its own port (never routed through the public tunnel / proxy).
+	var panelSrv *http.Server
+	panelAddr := env("ADMIN_PANEL_ADDR", ":8097")
+	if strings.EqualFold(panelAddr, "off") {
+		panelAddr = ""
+	}
+	if panelAddr != "" {
+		panel := NewPanel(store, api, filepath.Join(dataDir, "feynos-fit.json"), envBool("ADMIN_ALLOW_PUBLIC", false))
+		panel.secureCookie = envBool("ADMIN_SECURE_COOKIE", false)
+		panelSrv = &http.Server{
+			Addr: panelAddr, Handler: panel.Routes(),
+			ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 30 * time.Second,
+			IdleTimeout: 90 * time.Second, MaxHeaderBytes: 16 << 10,
+		}
+	}
+
 	// Hourly housekeeping.
 	stop := make(chan struct{})
 	go func() {
@@ -150,14 +171,23 @@ func serve() error {
 		}
 	}()
 
-	errc := make(chan error, 2)
+	errc := make(chan error, 3)
 	go func() { errc <- srv.ListenAndServe() }()
 	go func() { errc <- admin.ListenAndServe() }()
+	if panelSrv != nil {
+		go func() { errc <- panelSrv.ListenAndServe() }()
+	}
 
-	var code string
+	var code, setupCode string
 	var users int
-	store.Read(func(d *Data) { code, users = d.SignupCode, len(d.Users) })
+	store.Read(func(d *Data) { code, users, setupCode = d.SignupCode, len(d.Users), d.AdminSetupCode })
 	log.Printf("Feynos Fit server %s listening on %s (%d accounts)", version, addr, users)
+	if panelSrv != nil {
+		log.Printf("Admin panel on %s (home network only)", panelAddr)
+		if setupCode != "" {
+			log.Printf("Admin panel setup code: %s  (open the panel and create your admin password)", setupCode)
+		}
+	}
 	if cfg.AllowSignup {
 		log.Printf("Invite code for new accounts: %s", code)
 	} else {
@@ -178,6 +208,9 @@ func serve() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = admin.Shutdown(ctx)
+	if panelSrv != nil {
+		_ = panelSrv.Shutdown(ctx)
+	}
 	return srv.Shutdown(ctx)
 }
 
@@ -219,6 +252,26 @@ func adminRoutes(store *Store, token string) http.Handler {
 	m.HandleFunc("POST /new-signup-code", guard(func(w http.ResponseWriter, r *http.Request) {
 		var code string
 		_ = store.Write(func(d *Data) error { d.SignupCode = randomCode(10); code = d.SignupCode; return nil })
+		writeJSON(w, 200, map[string]string{"code": code})
+	}))
+	m.HandleFunc("GET /admin-setup-code", guard(func(w http.ResponseWriter, r *http.Request) {
+		store.Read(func(d *Data) {
+			if d.AdminPassHash != "" {
+				writeJSON(w, 200, map[string]string{"code": ""})
+				return
+			}
+			writeJSON(w, 200, map[string]string{"code": d.AdminSetupCode})
+		})
+	}))
+	m.HandleFunc("POST /reset-admin-password", guard(func(w http.ResponseWriter, r *http.Request) {
+		var code string
+		_ = store.Write(func(d *Data) error {
+			d.AdminPassHash = ""
+			d.AdminSetupCode = randomCode(8)
+			code = d.AdminSetupCode
+			return nil
+		})
+		log.Printf("admin: web admin password reset from the command line")
 		writeJSON(w, 200, map[string]string{"code": code})
 	}))
 	m.HandleFunc("GET /users", guard(func(w http.ResponseWriter, r *http.Request) {
@@ -334,6 +387,25 @@ func adminCommand(cmd string, args []string) error {
 		var v struct{ Code string }
 		_ = json.Unmarshal(out, &v)
 		fmt.Println(v.Code)
+	case "admin-setup-code", "reset-admin-password":
+		method, path := "GET", "/admin-setup-code"
+		if cmd == "reset-admin-password" {
+			method, path = "POST", "/reset-admin-password"
+		}
+		out, err := call(method, path, nil)
+		if err != nil {
+			return err
+		}
+		var v struct{ Code string }
+		_ = json.Unmarshal(out, &v)
+		if v.Code == "" {
+			fmt.Println("The admin password is already set. To start over: /feynos-server reset-admin-password")
+		} else {
+			if cmd == "reset-admin-password" {
+				fmt.Println("Admin password cleared and everyone signed out of the panel.")
+			}
+			fmt.Println("Setup code:", v.Code)
+		}
 	case "users":
 		out, err := call("GET", "/users", nil)
 		if err != nil {
