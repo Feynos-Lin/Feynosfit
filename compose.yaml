@@ -17,10 +17,10 @@ services:
     container_name: feynos-fit-server
     restart: unless-stopped
     ports:
-      # App API. Point your reverse proxy at it:
-      #   nginx running in this same compose setup  -> http://feynos-fit:8095
-      #   nginx running directly on the machine     -> http://127.0.0.1:8095
-      - "127.0.0.1:8095:8095"
+      # App API, for your reverse proxy (Nginx Proxy Manager -> http://<this PC's LAN IP>:8095,
+      # or http://feynos-fit:8095 if it shares a Docker network). Reachable on your home
+      # network only; don't port-forward 8095 on the router — forward 443 to nginx instead.
+      - "8095:8095"
       # Web admin panel: http://<this PC's IP>:8097 from your home network.
       # It refuses public internet addresses. Don't port-forward 8097 or proxy it.
       - "8097:8097"
