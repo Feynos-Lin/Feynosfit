@@ -17,7 +17,7 @@ permissions:
   contents: write
 
 env:
-  APP_VERSION: "0.4"
+  APP_VERSION: "0.5"
 
 jobs:
   build:
@@ -28,7 +28,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p FeynosFit && cd FeynosFit
-          mkdir -p 'app' 'app/src/main' 'app/src/main/java/com/feynos/fit' 'app/src/main/java/com/feynos/fit/data' 'app/src/main/java/com/feynos/fit/ui' 'app/src/main/res/drawable' 'app/src/main/res/mipmap-anydpi-v26' 'app/src/main/res/values' 'app/src/main/res/values-night' 'app/src/main/res/xml'
+          mkdir -p 'app' 'app/src/main' 'app/src/main/java/com/feynos/fit' 'app/src/main/java/com/feynos/fit/data' 'app/src/main/java/com/feynos/fit/ui' 'app/src/main/java/com/feynos/fit/widget' 'app/src/main/res/drawable' 'app/src/main/res/layout' 'app/src/main/res/mipmap-anydpi-v26' 'app/src/main/res/values' 'app/src/main/res/values-night' 'app/src/main/res/xml'
 
           cat > 'build.gradle.kts' <<'FEYNOS_EOF'
           plugins {
@@ -80,7 +80,7 @@ jobs:
                   minSdk = 26
                   targetSdk = 34
                   versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-                  versionName = System.getenv("APP_VERSION") ?: "0.4"
+                  versionName = System.getenv("APP_VERSION") ?: "0.5"
               }
 
               signingConfigs {
@@ -217,6 +217,19 @@ jobs:
                       </intent-filter>
                   </activity-alias>
 
+                  <!-- Home-screen widget -->
+                  <receiver
+                      android:name=".widget.TodayWidget"
+                      android:exported="false"
+                      android:label="@string/app_name">
+                      <intent-filter>
+                          <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.appwidget.provider"
+                          android:resource="@xml/widget_today_info" />
+                  </receiver>
+
                   <provider
                       android:name="androidx.core.content.FileProvider"
                       android:authorities="${applicationId}.files"
@@ -248,6 +261,247 @@ jobs:
           </vector>
           FEYNOS_EOF
 
+          cat > 'app/src/main/res/drawable/widget_bar_carbs.xml' <<'FEYNOS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+              <item android:id="@android:id/background">
+                  <shape><corners android:radius="3dp" /><solid android:color="@color/widget_track" /></shape>
+              </item>
+              <item android:id="@android:id/progress">
+                  <clip><shape><corners android:radius="3dp" /><solid android:color="#FF26A69A" /></shape></clip>
+              </item>
+          </layer-list>
+          FEYNOS_EOF
+
+          cat > 'app/src/main/res/drawable/widget_bar_fat.xml' <<'FEYNOS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+              <item android:id="@android:id/background">
+                  <shape><corners android:radius="3dp" /><solid android:color="@color/widget_track" /></shape>
+              </item>
+              <item android:id="@android:id/progress">
+                  <clip><shape><corners android:radius="3dp" /><solid android:color="#FF7E57C2" /></shape></clip>
+              </item>
+          </layer-list>
+          FEYNOS_EOF
+
+          cat > 'app/src/main/res/drawable/widget_bar_protein.xml' <<'FEYNOS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+              <item android:id="@android:id/background">
+                  <shape><corners android:radius="3dp" /><solid android:color="@color/widget_track" /></shape>
+              </item>
+              <item android:id="@android:id/progress">
+                  <clip><shape><corners android:radius="3dp" /><solid android:color="#FFFF8A00" /></shape></clip>
+              </item>
+          </layer-list>
+          FEYNOS_EOF
+
+          cat > 'app/src/main/res/drawable/widget_bg.xml' <<'FEYNOS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <solid android:color="@color/widget_bg" />
+              <corners android:radius="24dp" />
+          </shape>
+          FEYNOS_EOF
+
+          cat > 'app/src/main/res/drawable/widget_button.xml' <<'FEYNOS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <solid android:color="@color/widget_accent" />
+              <corners android:radius="16dp" />
+          </shape>
+          FEYNOS_EOF
+
+          cat > 'app/src/main/res/drawable/widget_button_tonal.xml' <<'FEYNOS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <solid android:color="@color/widget_tonal" />
+              <corners android:radius="16dp" />
+          </shape>
+          FEYNOS_EOF
+
+          cat > 'app/src/main/res/layout/widget_today.xml' <<'FEYNOS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/w_root"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:background="@drawable/widget_bg"
+              android:orientation="vertical"
+              android:padding="12dp">
+
+              <LinearLayout
+                  android:layout_width="match_parent"
+                  android:layout_height="0dp"
+                  android:layout_weight="1"
+                  android:gravity="center_vertical"
+                  android:orientation="horizontal">
+
+                  <FrameLayout
+                      android:layout_width="76dp"
+                      android:layout_height="76dp">
+
+                      <ImageView
+                          android:id="@+id/w_ring"
+                          android:layout_width="match_parent"
+                          android:layout_height="match_parent"
+                          android:contentDescription="@null" />
+
+                      <LinearLayout
+                          android:layout_width="match_parent"
+                          android:layout_height="match_parent"
+                          android:gravity="center"
+                          android:orientation="vertical">
+
+                          <TextView
+                              android:id="@+id/w_remaining"
+                              android:text="1,250"
+                              android:layout_width="wrap_content"
+                              android:layout_height="wrap_content"
+                              android:textColor="@color/widget_text"
+                              android:textSize="18sp"
+                              android:textStyle="bold" />
+
+                          <TextView
+                              android:id="@+id/w_remaining_label"
+                              android:text="cal left"
+                              android:layout_width="wrap_content"
+                              android:layout_height="wrap_content"
+                              android:textColor="@color/widget_text_dim"
+                              android:textSize="10sp" />
+                      </LinearLayout>
+                  </FrameLayout>
+
+                  <LinearLayout
+                      android:layout_width="0dp"
+                      android:layout_height="wrap_content"
+                      android:layout_marginStart="12dp"
+                      android:layout_weight="1"
+                      android:orientation="vertical">
+
+                      <TextView
+                          android:id="@+id/w_summary"
+                              android:text="Eaten 750 · Burned 0 · Goal 2000"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:maxLines="1"
+                          android:textColor="@color/widget_text_dim"
+                          android:textSize="11sp" />
+
+                      <TextView
+                          android:id="@+id/w_protein"
+                              android:text="Protein 45 / 150 g"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:layout_marginTop="4dp"
+                          android:maxLines="1"
+                          android:textColor="@color/widget_text"
+                          android:textSize="11sp" />
+
+                      <ProgressBar
+                          android:id="@+id/w_protein_bar"
+                          style="@android:style/Widget.ProgressBar.Horizontal"
+                          android:layout_width="match_parent"
+                          android:layout_height="5dp"
+                          android:max="1000"
+                          android:progressDrawable="@drawable/widget_bar_protein" />
+
+                      <TextView
+                          android:id="@+id/w_carbs"
+                              android:text="Carbs 80 / 200 g"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:layout_marginTop="3dp"
+                          android:maxLines="1"
+                          android:textColor="@color/widget_text"
+                          android:textSize="11sp" />
+
+                      <ProgressBar
+                          android:id="@+id/w_carbs_bar"
+                          style="@android:style/Widget.ProgressBar.Horizontal"
+                          android:layout_width="match_parent"
+                          android:layout_height="5dp"
+                          android:max="1000"
+                          android:progressDrawable="@drawable/widget_bar_carbs" />
+
+                      <TextView
+                          android:id="@+id/w_fat"
+                              android:text="Fat 25 / 67 g"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:layout_marginTop="3dp"
+                          android:maxLines="1"
+                          android:textColor="@color/widget_text"
+                          android:textSize="11sp" />
+
+                      <ProgressBar
+                          android:id="@+id/w_fat_bar"
+                          style="@android:style/Widget.ProgressBar.Horizontal"
+                          android:layout_width="match_parent"
+                          android:layout_height="5dp"
+                          android:max="1000"
+                          android:progressDrawable="@drawable/widget_bar_fat" />
+                  </LinearLayout>
+              </LinearLayout>
+
+              <LinearLayout
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="8dp"
+                  android:gravity="center_vertical"
+                  android:orientation="horizontal">
+
+                  <TextView
+                      android:id="@+id/w_water"
+                              android:text="Water 34 fl oz"
+                      android:layout_width="0dp"
+                      android:layout_height="wrap_content"
+                      android:layout_weight="1"
+                      android:maxLines="1"
+                      android:textColor="@color/widget_text"
+                      android:textSize="11sp" />
+
+                  <TextView
+                      android:id="@+id/w_steps"
+                              android:text="4,210 steps"
+                      android:layout_width="0dp"
+                      android:layout_height="wrap_content"
+                      android:layout_weight="1"
+                      android:maxLines="1"
+                      android:textColor="@color/widget_text"
+                      android:textSize="11sp" />
+
+                  <TextView
+                      android:id="@+id/w_add_water"
+                      android:layout_width="wrap_content"
+                      android:layout_height="32dp"
+                      android:background="@drawable/widget_button_tonal"
+                      android:gravity="center"
+                      android:paddingStart="10dp"
+                      android:paddingEnd="10dp"
+                      android:text="@string/widget_add_water"
+                      android:textColor="@color/widget_tonal_text"
+                      android:textSize="12sp"
+                      android:textStyle="bold" />
+
+                  <TextView
+                      android:id="@+id/w_add_food"
+                      android:layout_width="wrap_content"
+                      android:layout_height="32dp"
+                      android:layout_marginStart="6dp"
+                      android:background="@drawable/widget_button"
+                      android:gravity="center"
+                      android:paddingStart="12dp"
+                      android:paddingEnd="12dp"
+                      android:text="@string/widget_add_food"
+                      android:textColor="@color/widget_on_accent"
+                      android:textSize="12sp"
+                      android:textStyle="bold" />
+              </LinearLayout>
+          </LinearLayout>
+          FEYNOS_EOF
+
           cat > 'app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml' <<'FEYNOS_EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
@@ -261,6 +515,14 @@ jobs:
           <resources>
               <color name="window_bg">#FF111411</color>
               <color name="ic_launcher_background">#FF1E8E3E</color>
+              <color name="widget_bg">#F21A1F1B</color>
+              <color name="widget_text">#FFE1E3DE</color>
+              <color name="widget_text_dim">#FFA9B2AA</color>
+              <color name="widget_track">#FF333B34</color>
+              <color name="widget_accent">#FF6FDB8F</color>
+              <color name="widget_on_accent">#FF003917</color>
+              <color name="widget_tonal">#FF005224</color>
+              <color name="widget_tonal_text">#FFB7F1C2</color>
           </resources>
           FEYNOS_EOF
 
@@ -268,12 +530,23 @@ jobs:
           <resources>
               <color name="window_bg">#FFFBFDF8</color>
               <color name="ic_launcher_background">#FF1E8E3E</color>
+              <color name="widget_bg">#F2FBFDF8</color>
+              <color name="widget_text">#FF191C19</color>
+              <color name="widget_text_dim">#FF5A635B</color>
+              <color name="widget_track">#FFDDE5DB</color>
+              <color name="widget_accent">#FF1E8E3E</color>
+              <color name="widget_on_accent">#FFFFFFFF</color>
+              <color name="widget_tonal">#FFB7F1C2</color>
+              <color name="widget_tonal_text">#FF00210B</color>
           </resources>
           FEYNOS_EOF
 
           cat > 'app/src/main/res/values/strings.xml' <<'FEYNOS_EOF'
           <resources>
               <string name="app_name">Feynos Fit</string>
+              <string name="widget_add_food">+ Food</string>
+              <string name="widget_add_water">+ Water</string>
+              <string name="widget_description">Calories left, macros, water and steps for today, with quick add buttons.</string>
           </resources>
           FEYNOS_EOF
 
@@ -294,6 +567,23 @@ jobs:
           </paths>
           FEYNOS_EOF
 
+          cat > 'app/src/main/res/xml/widget_today_info.xml' <<'FEYNOS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+              android:description="@string/widget_description"
+              android:initialLayout="@layout/widget_today"
+              android:previewLayout="@layout/widget_today"
+              android:minWidth="250dp"
+              android:minHeight="110dp"
+              android:minResizeWidth="250dp"
+              android:minResizeHeight="110dp"
+              android:targetCellWidth="4"
+              android:targetCellHeight="2"
+              android:resizeMode="horizontal|vertical"
+              android:updatePeriodMillis="1800000"
+              android:widgetCategory="home_screen" />
+          FEYNOS_EOF
+
           cat > 'app/src/main/java/com/feynos/fit/MainActivity.kt' <<'FEYNOS_EOF'
           package com.feynos.fit
 
@@ -305,10 +595,15 @@ jobs:
           import androidx.compose.runtime.mutableStateOf
           import androidx.compose.runtime.setValue
           import com.feynos.fit.data.AppScope
+          import com.feynos.fit.data.Calc
+          import com.feynos.fit.data.Dates
           import com.feynos.fit.data.HealthSync
           import com.feynos.fit.data.Store
           import com.feynos.fit.ui.FitApp
+          import com.feynos.fit.ui.LaunchRequest
+          import com.feynos.fit.ui.Screen
           import com.feynos.fit.ui.UpdateUi
+          import com.feynos.fit.widget.TodayWidget
           import kotlinx.coroutines.launch
 
           class MainActivity : ComponentActivity() {
@@ -321,12 +616,14 @@ jobs:
                   Store.onDiaryChanged = { date -> HealthSync.schedulePush(app, date) }
                   Store.onWeightLogged = { date, kg -> HealthSync.pushWeight(app, date, kg) }
                   showPrivacy = isPrivacyIntent(intent)
+                  handleOpen(intent)
                   setContent { FitApp(showPrivacy) { showPrivacy = false } }
               }
 
               override fun onNewIntent(intent: Intent) {
                   super.onNewIntent(intent)
                   if (isPrivacyIntent(intent)) showPrivacy = true
+                  handleOpen(intent)
               }
 
               override fun onResume() {
@@ -334,6 +631,19 @@ jobs:
                   val app = applicationContext
                   AppScope.launch { HealthSync.syncRecent(app) }
                   if (Store.current.profile.autoUpdateCheck) UpdateUi.check(silent = true)
+              }
+
+              /** "+ Food" on the widget jumps straight to food search for the current meal. */
+              private fun handleOpen(i: Intent?) {
+                  if (i?.getStringExtra(TodayWidget.EXTRA_OPEN) == TodayWidget.OPEN_ADD_FOOD && Store.current.profile.onboarded) {
+                      LaunchRequest.screen = Screen.AddFood(Dates.today(), Calc.defaultMeal())
+                      i.removeExtra(TodayWidget.EXTRA_OPEN)
+                  }
+              }
+
+              override fun onPause() {
+                  super.onPause()
+                  TodayWidget.updateAll(applicationContext)
               }
 
               private fun isPrivacyIntent(i: Intent?): Boolean =
@@ -2689,8 +2999,11 @@ jobs:
                   dates.toSet().forEach { cb(it) }
               }
 
+              private var appContext: Context? = null
+
               fun init(context: Context) {
                   if (file != null) return
+                  appContext = context.applicationContext
                   val f = File(context.filesDir, "feynos_fit.json")
                   file = f
                   if (f.exists()) {
@@ -2702,6 +3015,7 @@ jobs:
               fun update(block: (AppData) -> AppData) {
                   _data.update(block)
                   io.execute { persist() }
+                  appContext?.let { com.feynos.fit.widget.TodayWidget.requestUpdate(it) }
               }
 
               private fun persist() {
@@ -3581,6 +3895,7 @@ jobs:
           import androidx.compose.material3.Text
           import androidx.compose.runtime.Composable
           import androidx.compose.runtime.CompositionLocalProvider
+          import androidx.compose.runtime.LaunchedEffect
           import androidx.compose.runtime.collectAsState
           import androidx.compose.runtime.getValue
           import androidx.compose.runtime.mutableIntStateOf
@@ -3623,6 +3938,11 @@ jobs:
 
           val LocalNav = staticCompositionLocalOf { Nav() }
 
+          /** A screen requested from outside the UI (e.g. the home-screen widget). */
+          object LaunchRequest {
+              var screen by mutableStateOf<Screen?>(null)
+          }
+
           @Composable
           fun FitApp(showHealthPrivacy: Boolean = false, onPrivacyShown: () -> Unit = {}) {
               val data by Store.data.collectAsState()
@@ -3646,6 +3966,14 @@ jobs:
                   "Progress" to Icons.Filled.ShowChart,
                   "More" to Icons.Filled.MoreHoriz,
               )
+              val requested = LaunchRequest.screen
+              LaunchedEffect(requested) {
+                  if (requested != null) {
+                      nav.stack.clear()
+                      nav.push(requested)
+                      LaunchRequest.screen = null
+                  }
+              }
               CompositionLocalProvider(LocalNav provides nav) {
                   val top = nav.stack.lastOrNull()
                   BackHandler(enabled = top != null) { nav.pop() }
@@ -6829,6 +7157,171 @@ jobs:
                   }
               }
               MaterialTheme(colorScheme = scheme, content = content)
+          }
+          FEYNOS_EOF
+
+          cat > 'app/src/main/java/com/feynos/fit/widget/TodayWidget.kt' <<'FEYNOS_EOF'
+          package com.feynos.fit.widget
+
+          import android.app.PendingIntent
+          import android.appwidget.AppWidgetManager
+          import android.appwidget.AppWidgetProvider
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Bitmap
+          import android.graphics.Canvas
+          import android.graphics.Paint
+          import android.graphics.RectF
+          import android.os.Handler
+          import android.os.Looper
+          import android.widget.RemoteViews
+          import com.feynos.fit.MainActivity
+          import com.feynos.fit.R
+          import com.feynos.fit.data.Calc
+          import com.feynos.fit.data.Dates
+          import com.feynos.fit.data.Nutrients
+          import com.feynos.fit.data.Store
+          import com.feynos.fit.data.Units
+          import com.feynos.fit.data.f0
+          import com.feynos.fit.data.grouped
+          import kotlin.math.abs
+
+          /**
+           * "Today" home-screen widget: calories left (ring), eaten / burned / goal, protein-carbs-fat bars,
+           * water and steps, plus one-tap "+ Water" and "+ Food".
+           */
+          class TodayWidget : AppWidgetProvider() {
+
+              override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
+                  Store.init(context)
+                  render(context, manager, ids)
+              }
+
+              override fun onReceive(context: Context, intent: Intent) {
+                  if (intent.action == ACTION_ADD_WATER) {
+                      Store.init(context)
+                      val today = Dates.today()
+                      Store.setWater(today, (Store.current.water[today] ?: 0) + GLASS_ML)
+                      updateAll(context)
+                      return
+                  }
+                  super.onReceive(context, intent)
+              }
+
+              companion object {
+                  const val ACTION_ADD_WATER = "com.feynos.fit.widget.ADD_WATER"
+                  const val EXTRA_OPEN = "open"
+                  const val OPEN_ADD_FOOD = "add_food"
+                  private const val GLASS_ML = 250
+
+                  private val main = Handler(Looper.getMainLooper())
+                  private var appCtx: Context? = null
+                  private val pending = Runnable { appCtx?.let { updateAll(it) } }
+
+                  /** Debounced refresh, safe to call after every data change. */
+                  fun requestUpdate(context: Context) {
+                      appCtx = context.applicationContext
+                      main.removeCallbacks(pending)
+                      main.postDelayed(pending, 400)
+                  }
+
+                  fun updateAll(context: Context) {
+                      val mgr = AppWidgetManager.getInstance(context) ?: return
+                      val ids = runCatching { mgr.getAppWidgetIds(ComponentName(context, TodayWidget::class.java)) }.getOrNull() ?: return
+                      if (ids.isNotEmpty()) render(context, mgr, ids)
+                  }
+
+                  private fun render(context: Context, mgr: AppWidgetManager, ids: IntArray) {
+                      val views = build(context)
+                      for (id in ids) runCatching { mgr.updateAppWidget(id, views) }
+                  }
+
+                  private fun build(ctx: Context): RemoteViews {
+                      val d = Store.current
+                      val p = d.profile
+                      val today = Dates.today()
+                      val food = d.diary.filter { it.date == today }.fold(Nutrients.ZERO) { a, e -> a + e.total }
+                      val burned = d.exercises.filter { it.date == today }.sumOf { it.kcal }
+                      val budget = p.calorieGoal + burned
+                      val remaining = budget - food.kcal
+                      val (pg, cg, fg) = Calc.macroGrams(p)
+                      val water = d.water[today] ?: 0
+                      val steps = d.steps[today] ?: 0
+
+                      val v = RemoteViews(ctx.packageName, R.layout.widget_today)
+
+                      val over = remaining < 0
+                      v.setImageViewBitmap(R.id.w_ring, ring(ctx, if (budget <= 0) 0f else (food.kcal / budget).toFloat(), over))
+                      v.setTextViewText(R.id.w_remaining, abs(remaining).f0())
+                      v.setTextViewText(R.id.w_remaining_label, if (over) "cal over" else "cal left")
+
+                      v.setTextViewText(
+                          R.id.w_summary,
+                          if (p.onboarded) "Eaten ${food.kcal.f0()} · Burned ${burned.f0()} · Goal ${p.calorieGoal}"
+                          else "Open Feynos Fit to set your goals",
+                      )
+                      v.setTextViewText(R.id.w_protein, "Protein ${food.protein.f0()} / ${pg.f0()} g")
+                      v.setTextViewText(R.id.w_carbs, "Carbs ${food.carbs.f0()} / ${cg.f0()} g")
+                      v.setTextViewText(R.id.w_fat, "Fat ${food.fat.f0()} / ${fg.f0()} g")
+                      v.setProgressBar(R.id.w_protein_bar, 1000, permille(food.protein, pg), false)
+                      v.setProgressBar(R.id.w_carbs_bar, 1000, permille(food.carbs, cg), false)
+                      v.setProgressBar(R.id.w_fat_bar, 1000, permille(food.fat, fg), false)
+
+                      v.setTextViewText(R.id.w_water, "Water ${Units.water(water, p.imperial)}")
+                      v.setTextViewText(R.id.w_steps, "${steps.grouped()} steps")
+
+                      // Tapping the widget opens the app; "+ Food" goes straight to food search.
+                      val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                      val open = PendingIntent.getActivity(
+                          ctx, 0,
+                          Intent(ctx, MainActivity::class.java).setAction("com.feynos.fit.OPEN").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                          flags,
+                      )
+                      val addFood = PendingIntent.getActivity(
+                          ctx, 1,
+                          Intent(ctx, MainActivity::class.java)
+                              .setAction("com.feynos.fit.ADD_FOOD")
+                              .putExtra(EXTRA_OPEN, OPEN_ADD_FOOD)
+                              .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                          flags,
+                      )
+                      val addWater = PendingIntent.getBroadcast(
+                          ctx, 2,
+                          Intent(ctx, TodayWidget::class.java).setAction(ACTION_ADD_WATER),
+                          flags,
+                      )
+                      v.setOnClickPendingIntent(R.id.w_root, open)
+                      v.setOnClickPendingIntent(R.id.w_add_food, addFood)
+                      v.setOnClickPendingIntent(R.id.w_add_water, addWater)
+                      return v
+                  }
+
+                  private fun permille(value: Double, goal: Double): Int =
+                      if (goal <= 0) 0 else ((value / goal) * 1000).toInt().coerceIn(0, 1000)
+
+                  /** Same 270° gauge as the app's dashboard, drawn to a bitmap. */
+                  private fun ring(ctx: Context, fraction: Float, over: Boolean): Bitmap {
+                      val px = (76 * ctx.resources.displayMetrics.density).toInt().coerceIn(96, 320)
+                      val bmp = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
+                      val c = Canvas(bmp)
+                      val stroke = px * 0.1f
+                      val rect = RectF(stroke / 2, stroke / 2, px - stroke / 2, px - stroke / 2)
+                      val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                          style = Paint.Style.STROKE
+                          strokeWidth = stroke
+                          strokeCap = Paint.Cap.ROUND
+                      }
+                      paint.color = ctx.getColor(R.color.widget_track)
+                      c.drawArc(rect, 135f, 270f, false, paint)
+                      val f = fraction.coerceIn(0f, 1f)
+                      if (f > 0f) {
+                          paint.color = if (over) 0xFFE5484D.toInt() else ctx.getColor(R.color.widget_accent)
+                          c.drawArc(rect, 135f, 270f * f, false, paint)
+                      }
+                      return bmp
+                  }
+              }
           }
           FEYNOS_EOF
 
