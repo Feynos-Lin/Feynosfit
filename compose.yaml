@@ -1,0 +1,44 @@
+# Feynos Fit friends & challenges server.
+#
+# Include this file from your main compose.yaml:
+#
+#   include:
+#     - Feynosfit/compose.yaml
+#
+# then run `docker compose up -d --build` from the folder with your main compose.yaml.
+# Get the codes you need with:
+#   docker exec feynos-fit-server /feynos-server signup-code       (app invite code)
+#   docker exec feynos-fit-server /feynos-server admin-setup-code  (web admin panel)
+
+services:
+  feynos-fit:
+    build: ./server
+    image: feynos-fit-server:latest
+    container_name: feynos-fit-server
+    restart: unless-stopped
+    ports:
+      # App API. Point your reverse proxy at it:
+      #   nginx running in this same compose setup  -> http://feynos-fit:8095
+      #   nginx running directly on the machine     -> http://127.0.0.1:8095
+      - "127.0.0.1:8095:8095"
+      # Web admin panel: http://<this PC's IP>:8097 from your home network.
+      # It refuses public internet addresses. Don't port-forward 8097 or proxy it.
+      - "8097:8097"
+    environment:
+      TRUST_PROXY: "true"   # use the client IP your reverse proxy passes on
+      ALLOW_SIGNUP: "true"  # or open/close sign-ups from the admin panel
+      TZ: "America/Denver"
+      # SIGNUP_CODE: "my-secret-invite"
+    volumes:
+      - feynos-fit-data:/data
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    pids_limit: 64
+
+volumes:
+  feynos-fit-data:
+    # Fixed name, so the data stays put no matter which compose file starts it.
+    name: feynos-fit-data

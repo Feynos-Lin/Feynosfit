@@ -26,6 +26,21 @@ docker exec feynos-fit-server /feynos-server admin-setup-code
 To update later, run the same lines again. Your data lives in a Docker volume, so
 re-downloading the files doesn't touch it.
 
+### Already have a main compose.yaml that includes each app?
+
+Clone (or unzip) the repo next to your other app folders, then add one line to your main
+`compose.yaml`:
+
+```yaml
+include:
+  - Feynosfit/compose.yaml
+```
+
+Run `docker compose up -d --build` from the folder with your main file. The repo's root
+`compose.yaml` builds from `server/` and keeps its data in a volume named
+`feynos-fit-data`. If nginx runs in the same compose setup, proxy your hostname to
+`http://feynos-fit:8095`.
+
 ### Linux / macOS
 
 Needs Docker with the compose plugin:
