@@ -1,0 +1,57 @@
+# Tests the friends & challenges server and checks its Docker image builds and runs.
+name: Server
+
+on:
+  push:
+    branches: [main, master]
+    paths: ["server/**", ".github/workflows/server.yml"]
+  pull_request:
+    paths: ["server/**"]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Format and vet
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+          go vet ./...
+
+      - name: Unit tests
+        run: go test -count=1 -race ./...
+
+      - name: Build Docker image
+        run: docker compose build
+
+      - name: Smoke-test the container
+        run: |
+          docker compose up -d
+          for i in $(seq 1 30); do
+            s=$(docker inspect -f '{{.State.Health.Status}}' feynos-fit-server)
+            [ "$s" = healthy ] && break
+            sleep 2
+          done
+          docker inspect -f 'health={{.State.Health.Status}}' feynos-fit-server
+          curl -fsS http://127.0.0.1:8095/api/v1/health
+          CODE=$(docker exec feynos-fit-server /feynos-server signup-code)
+          curl -fsS -X POST http://127.0.0.1:8095/api/v1/register \
+            -d "{\"username\":\"ci-user\",\"password\":\"ci-password-123\",\"displayName\":\"CI\",\"signupCode\":\"$CODE\"}" > /dev/null
+          docker exec feynos-fit-server /feynos-server users | grep ci-user
+          docker compose restart
+          sleep 3
+          docker exec feynos-fit-server /feynos-server users | grep ci-user   # data survived restart
+          echo "Container OK"
+
+      - name: Logs
+        if: always()
+        run: docker compose logs

@@ -11,17 +11,18 @@ name: Build Feynos Fit
 on:
   push:
     branches: [main, master]
+    paths: [".github/workflows/build.yml"]   # server/ changes don't rebuild the app
   workflow_dispatch:
 
 permissions:
   contents: write
 
 env:
-  APP_VERSION: "0.5"
+  APP_VERSION: "0.6"
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Write project files
         shell: bash
@@ -80,7 +81,7 @@ jobs:
                   minSdk = 26
                   targetSdk = 34
                   versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-                  versionName = System.getenv("APP_VERSION") ?: "0.5"
+                  versionName = System.getenv("APP_VERSION") ?: "0.6"
               }
 
               signingConfigs {
@@ -598,13 +599,16 @@ jobs:
           import com.feynos.fit.data.Calc
           import com.feynos.fit.data.Dates
           import com.feynos.fit.data.HealthSync
+          import com.feynos.fit.data.Social
           import com.feynos.fit.data.Store
           import com.feynos.fit.ui.FitApp
           import com.feynos.fit.ui.LaunchRequest
           import com.feynos.fit.ui.Screen
           import com.feynos.fit.ui.UpdateUi
           import com.feynos.fit.widget.TodayWidget
+          import kotlinx.coroutines.Dispatchers
           import kotlinx.coroutines.launch
+          import kotlinx.coroutines.withContext
 
           class MainActivity : ComponentActivity() {
               private var showPrivacy by mutableStateOf(false)
@@ -629,7 +633,11 @@ jobs:
               override fun onResume() {
                   super.onResume()
                   val app = applicationContext
-                  AppScope.launch { HealthSync.syncRecent(app) }
+                  AppScope.launch {
+                      HealthSync.syncRecent(app)
+                      // Share today's steps with friends (if signed in to a Feynos Fit server).
+                      withContext(Dispatchers.IO) { runCatching { Social.pushSteps(app) } }
+                  }
                   if (Store.current.profile.autoUpdateCheck) UpdateUi.check(silent = true)
               }
 
@@ -2969,6 +2977,281 @@ jobs:
           }
           FEYNOS_EOF
 
+          cat > 'app/src/main/java/com/feynos/fit/data/Social.kt' <<'FEYNOS_EOF'
+          package com.feynos.fit.data
+
+          import android.content.Context
+          import android.content.SharedPreferences
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.io.IOException
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.net.URLEncoder
+
+          /**
+           * Client for the self-hosted Feynos Fit friends & challenges server (see server/ in the repo).
+           * Only step totals and a display name are ever sent. The session is kept in its own private
+           * preferences file, so it never ends up in the app's backup export.
+           */
+          object Social {
+
+              // ---------------------------------------------------------------- session
+
+              data class Session(val server: String, val token: String, val username: String, val displayName: String, val friendCode: String)
+
+              private fun prefs(ctx: Context): SharedPreferences = ctx.applicationContext.getSharedPreferences("social", Context.MODE_PRIVATE)
+
+              fun session(ctx: Context): Session? {
+                  val p = prefs(ctx)
+                  val token = p.getString("token", null) ?: return null
+                  val server = p.getString("server", null) ?: return null
+                  return Session(server, token, p.getString("username", "") ?: "", p.getString("displayName", "") ?: "", p.getString("friendCode", "") ?: "")
+              }
+
+              fun lastServer(ctx: Context): String = prefs(ctx).getString("server", "") ?: ""
+
+              private fun save(ctx: Context, server: String, token: String, user: JSONObject) {
+                  prefs(ctx).edit()
+                      .putString("server", server)
+                      .putString("token", token)
+                      .putString("username", user.optString("username"))
+                      .putString("displayName", user.optString("displayName"))
+                      .putString("friendCode", user.optString("friendCode"))
+                      .apply()
+              }
+
+              fun signOutLocally(ctx: Context) {
+                  prefs(ctx).edit().remove("token").remove("username").remove("displayName").remove("friendCode").apply()
+              }
+
+              // ---------------------------------------------------------------- models
+
+              data class Person(val id: String, val username: String, val displayName: String)
+
+              data class Friend(val person: Person, val today: Int, val week: Int)
+
+              data class FriendsInfo(val me: Friend, val friends: List<Friend>, val incoming: List<Person>, val outgoing: List<Person>)
+
+              data class Standing(val person: Person, val total: Int, val today: Int)
+
+              data class Challenge(
+                  val id: String,
+                  val name: String,
+                  val start: String,
+                  val end: String,
+                  val creatorId: String,
+                  val creatorName: String,
+                  val myStatus: String,
+                  val state: String,
+                  val leaderboard: List<Standing>,
+                  val invited: List<Person>,
+              )
+
+              class ApiException(val status: Int, message: String) : IOException(message)
+
+              // ---------------------------------------------------------------- HTTP
+
+              /** Accepts "fit.example.com" or "https://fit.example.com/" and returns "https://fit.example.com". */
+              fun normaliseServer(input: String): String {
+                  var s = input.trim().trimEnd('/')
+                  if (s.isEmpty()) throw ApiException(0, "Enter your server's address")
+                  if (!s.contains("://")) s = "https://$s"
+                  if (!s.startsWith("https://", ignoreCase = true)) {
+                      throw ApiException(0, "The server address must start with https:// so your password stays encrypted")
+                  }
+                  val u = runCatching { URL(s) }.getOrNull() ?: throw ApiException(0, "That doesn't look like a web address")
+                  if (u.host.isNullOrBlank()) throw ApiException(0, "That doesn't look like a web address")
+                  return s
+              }
+
+              private fun call(server: String, method: String, path: String, token: String?, body: JSONObject? = null): String {
+                  val c = URL(server + "/api/v1" + path).openConnection() as HttpURLConnection
+                  c.requestMethod = method
+                  c.connectTimeout = 15000
+                  c.readTimeout = 20000
+                  c.instanceFollowRedirects = false
+                  c.setRequestProperty("Accept", "application/json")
+                  c.setRequestProperty("User-Agent", "FeynosFit")
+                  if (token != null) c.setRequestProperty("Authorization", "Bearer $token")
+                  try {
+                      if (body != null) {
+                          c.doOutput = true
+                          c.setRequestProperty("Content-Type", "application/json")
+                          c.outputStream.use { it.write(body.toString().toByteArray()) }
+                      }
+                      val code = c.responseCode
+                      val stream = if (code in 200..299) c.inputStream else c.errorStream
+                      val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
+                      if (code !in 200..299) {
+                          val msg = runCatching { JSONObject(text).optString("error") }.getOrNull()?.takeIf { it.isNotBlank() }
+                              ?: when (code) {
+                                  in 300..399 -> "The server redirected the request. Check the address (use the https:// one)."
+                                  404 -> "No Feynos Fit server found at that address"
+                                  502, 503, 504 -> "The server isn't responding. Is the container running?"
+                                  else -> "Server error ($code)"
+                              }
+                          throw ApiException(code, msg)
+                      }
+                      return text
+                  } catch (e: ApiException) {
+                      throw e
+                  } catch (e: javax.net.ssl.SSLException) {
+                      throw ApiException(0, "Secure connection failed. Check the server's HTTPS certificate.")
+                  } catch (e: java.net.UnknownHostException) {
+                      throw ApiException(0, "Can't find that server. Check the address and your internet connection.")
+                  } catch (e: IOException) {
+                      throw ApiException(0, "Couldn't reach the server: ${e.message ?: "network error"}")
+                  } finally {
+                      c.disconnect()
+                  }
+              }
+
+              /** Runs an authenticated call; a 401 signs out locally so the UI shows the sign-in form. */
+              private fun authed(ctx: Context, method: String, path: String, body: JSONObject? = null): String {
+                  val s = session(ctx) ?: throw ApiException(401, "Please sign in")
+                  try {
+                      return call(s.server, method, path, s.token, body)
+                  } catch (e: ApiException) {
+                      if (e.status == 401) signOutLocally(ctx)
+                      throw e
+                  }
+              }
+
+              // ---------------------------------------------------------------- account (call off the main thread)
+
+              data class ServerInfo(val signupOpen: Boolean)
+
+              fun checkServer(input: String): ServerInfo {
+                  val server = normaliseServer(input)
+                  val o = JSONObject(call(server, "GET", "/health", null))
+                  if (o.optString("service") != "feynos-fit") throw ApiException(0, "That address isn't a Feynos Fit server")
+                  return ServerInfo(o.optBoolean("signup", true))
+              }
+
+              fun register(ctx: Context, serverInput: String, inviteCode: String, username: String, displayName: String, password: String) {
+                  val server = normaliseServer(serverInput)
+                  val body = JSONObject().put("signupCode", inviteCode).put("username", username)
+                      .put("displayName", displayName).put("password", password)
+                  val o = JSONObject(call(server, "POST", "/register", null, body))
+                  save(ctx, server, o.getString("token"), o.getJSONObject("user"))
+              }
+
+              fun login(ctx: Context, serverInput: String, username: String, password: String) {
+                  val server = normaliseServer(serverInput)
+                  val o = JSONObject(call(server, "POST", "/login", null, JSONObject().put("username", username).put("password", password)))
+                  save(ctx, server, o.getString("token"), o.getJSONObject("user"))
+              }
+
+              fun logout(ctx: Context) {
+                  runCatching { authed(ctx, "POST", "/logout") }
+                  signOutLocally(ctx)
+              }
+
+              fun deleteAccount(ctx: Context, password: String) {
+                  authed(ctx, "POST", "/me/delete", JSONObject().put("password", password))
+                  signOutLocally(ctx)
+              }
+
+              fun rename(ctx: Context, displayName: String) {
+                  val o = JSONObject(authed(ctx, "POST", "/me", JSONObject().put("displayName", displayName)))
+                  prefs(ctx).edit().putString("displayName", o.optString("displayName")).apply()
+              }
+
+              // ---------------------------------------------------------------- steps
+
+              /** Uploads the last two weeks of daily step totals. */
+              fun pushSteps(ctx: Context) {
+                  if (session(ctx) == null) return
+                  val steps = Store.current.steps
+                  val days = JSONArray()
+                  for (d in Dates.lastNDays(14)) {
+                      val n = steps[d] ?: continue
+                      days.put(JSONObject().put("date", d).put("steps", n.coerceIn(0, 150_000)))
+                  }
+                  if (days.length() == 0) return
+                  authed(ctx, "PUT", "/steps", JSONObject().put("days", days))
+              }
+
+              // ---------------------------------------------------------------- friends & challenges
+
+              private fun today() = URLEncoder.encode(Dates.today(), "UTF-8")
+
+              private fun person(o: JSONObject) = Person(o.optString("id"), o.optString("username"), o.optString("displayName"))
+
+              private fun people(a: JSONArray?): List<Person> =
+                  if (a == null) emptyList() else (0 until a.length()).mapNotNull { a.optJSONObject(it)?.let(::person) }
+
+              fun friends(ctx: Context): FriendsInfo {
+                  val o = JSONObject(authed(ctx, "GET", "/friends?today=${today()}"))
+                  fun friend(j: JSONObject) = Friend(person(j), j.optInt("today"), j.optInt("week"))
+                  val fa = o.optJSONArray("friends")
+                  val me = o.optJSONObject("me")
+                  me?.optString("friendCode")?.takeIf { it.isNotBlank() }?.let { prefs(ctx).edit().putString("friendCode", it).apply() }
+                  return FriendsInfo(
+                      me = if (me != null) friend(me) else Friend(Person("", "", ""), 0, 0),
+                      friends = if (fa == null) emptyList() else (0 until fa.length()).mapNotNull { fa.optJSONObject(it)?.let(::friend) },
+                      incoming = people(o.optJSONArray("incoming")),
+                      outgoing = people(o.optJSONArray("outgoing")),
+                  )
+              }
+
+              /** Returns "requested", "accepted" or "already_friends". */
+              fun addFriend(ctx: Context, code: String): String =
+                  JSONObject(authed(ctx, "POST", "/friends", JSONObject().put("code", code))).optString("result")
+
+              fun acceptFriend(ctx: Context, id: String) {
+                  authed(ctx, "POST", "/friends/${enc(id)}/accept")
+              }
+
+              fun removeFriend(ctx: Context, id: String) {
+                  authed(ctx, "DELETE", "/friends/${enc(id)}")
+              }
+
+              fun challenges(ctx: Context): List<Challenge> {
+                  val a = JSONObject(authed(ctx, "GET", "/challenges?today=${today()}")).optJSONArray("challenges") ?: return emptyList()
+                  return (0 until a.length()).mapNotNull { i ->
+                      val c = a.optJSONObject(i) ?: return@mapNotNull null
+                      val lb = c.optJSONArray("leaderboard")
+                      Challenge(
+                          id = c.optString("id"),
+                          name = c.optString("name"),
+                          start = c.optString("start"),
+                          end = c.optString("end"),
+                          creatorId = c.optString("creatorId"),
+                          creatorName = c.optString("creatorName"),
+                          myStatus = c.optString("myStatus"),
+                          state = c.optString("state"),
+                          leaderboard = if (lb == null) emptyList() else (0 until lb.length()).mapNotNull { j ->
+                              lb.optJSONObject(j)?.let { Standing(person(it), it.optInt("total"), it.optInt("today")) }
+                          },
+                          invited = people(c.optJSONArray("invited")),
+                      )
+                  }
+              }
+
+              fun createChallenge(ctx: Context, name: String, start: String, end: String, memberIds: List<String>) {
+                  val body = JSONObject().put("name", name).put("start", start).put("end", end)
+                      .put("memberIds", JSONArray().also { a -> memberIds.forEach { a.put(it) } })
+                  authed(ctx, "POST", "/challenges", body)
+              }
+
+              fun joinChallenge(ctx: Context, id: String) {
+                  authed(ctx, "POST", "/challenges/${enc(id)}/join")
+              }
+
+              fun leaveChallenge(ctx: Context, id: String) {
+                  authed(ctx, "POST", "/challenges/${enc(id)}/leave")
+              }
+
+              fun deleteChallenge(ctx: Context, id: String) {
+                  authed(ctx, "DELETE", "/challenges/${enc(id)}")
+              }
+
+              private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
+          }
+          FEYNOS_EOF
+
           cat > 'app/src/main/java/com/feynos/fit/data/Store.kt' <<'FEYNOS_EOF'
           package com.feynos.fit.data
 
@@ -3885,6 +4168,7 @@ jobs:
           import androidx.compose.material.icons.filled.Home
           import androidx.compose.material.icons.filled.MenuBook
           import androidx.compose.material.icons.filled.MoreHoriz
+          import androidx.compose.material.icons.filled.People
           import androidx.compose.material.icons.filled.ShowChart
           import androidx.compose.material3.Icon
           import androidx.compose.material3.MaterialTheme
@@ -3964,6 +4248,7 @@ jobs:
                   "Home" to Icons.Filled.Home,
                   "Diary" to Icons.Filled.MenuBook,
                   "Progress" to Icons.Filled.ShowChart,
+                  "Friends" to Icons.Filled.People,
                   "More" to Icons.Filled.MoreHoriz,
               )
               val requested = LaunchRequest.screen
@@ -4020,6 +4305,7 @@ jobs:
                                   })
                                   1 -> DiaryScreen(diaryDate) { diaryDate = it }
                                   2 -> ProgressScreen()
+                                  3 -> FriendsScreen()
                                   else -> MoreScreen()
                               }
                           }
@@ -5748,6 +6034,670 @@ jobs:
                       }
                   }
               }
+          }
+          FEYNOS_EOF
+
+          cat > 'app/src/main/java/com/feynos/fit/ui/Friends.kt' <<'FEYNOS_EOF'
+          package com.feynos.fit.ui
+
+          import android.content.ClipData
+          import android.content.ClipboardManager
+          import android.content.Context
+          import android.content.Intent
+          import android.widget.Toast
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.PaddingValues
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.text.KeyboardOptions
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.Add
+          import androidx.compose.material.icons.filled.MoreVert
+          import androidx.compose.material.icons.filled.Refresh
+          import androidx.compose.material.icons.filled.Star
+          import androidx.compose.material3.AlertDialog
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.Checkbox
+          import androidx.compose.material3.DropdownMenu
+          import androidx.compose.material3.DropdownMenuItem
+          import androidx.compose.material3.ElevatedCard
+          import androidx.compose.material3.FilledTonalButton
+          import androidx.compose.material3.HorizontalDivider
+          import androidx.compose.material3.Icon
+          import androidx.compose.material3.IconButton
+          import androidx.compose.material3.LinearProgressIndicator
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.OutlinedButton
+          import androidx.compose.material3.OutlinedTextField
+          import androidx.compose.material3.Scaffold
+          import androidx.compose.material3.Tab
+          import androidx.compose.material3.TabRow
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.TextButton
+          import androidx.compose.material3.TopAppBar
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableIntStateOf
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.rememberCoroutineScope
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.input.KeyboardType
+          import androidx.compose.ui.text.input.PasswordVisualTransformation
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.dp
+          import com.feynos.fit.data.Dates
+          import com.feynos.fit.data.Social
+          import com.feynos.fit.data.grouped
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.launch
+          import kotlinx.coroutines.withContext
+          import java.time.DayOfWeek
+          import java.time.LocalDate
+          import java.time.format.DateTimeFormatter
+          import java.util.Locale
+
+          /** Runs [block] off the main thread and returns its error message, if any. */
+          private suspend fun <T> io(block: () -> T): Result<T> = withContext(Dispatchers.IO) { runCatching(block) }
+
+          private fun Throwable.friendly(): String = message ?: "Something went wrong"
+
+          @Composable
+          fun FriendsScreen() {
+              val ctx = LocalContext.current
+              var session by remember { mutableStateOf(Social.session(ctx)) }
+              if (session == null) {
+                  ConnectScreen { session = Social.session(ctx) }
+              } else {
+                  SocialHome(onSignedOut = { session = null })
+              }
+          }
+
+          // ================================================================ connect / sign in
+
+          @Composable
+          private fun ConnectScreen(onConnected: () -> Unit) {
+              val ctx = LocalContext.current
+              val scope = rememberCoroutineScope()
+              var tab by remember { mutableIntStateOf(0) }
+              var server by remember { mutableStateOf(Social.lastServer(ctx)) }
+              var invite by remember { mutableStateOf("") }
+              var username by remember { mutableStateOf("") }
+              var display by remember { mutableStateOf(com.feynos.fit.data.Store.current.profile.name) }
+              var password by remember { mutableStateOf("") }
+              var busy by remember { mutableStateOf(false) }
+              var error by remember { mutableStateOf<String?>(null) }
+
+              fun submit() {
+                  busy = true
+                  error = null
+                  scope.launch {
+                      val r = io {
+                          Social.checkServer(server)
+                          if (tab == 0) Social.login(ctx, server, username, password)
+                          else Social.register(ctx, server, invite, username, display, password)
+                          runCatching { Social.pushSteps(ctx) }
+                      }
+                      busy = false
+                      r.onSuccess { onConnected() }.onFailure { error = it.friendly() }
+                  }
+              }
+
+              Scaffold(topBar = { TopAppBar(title = { Text("Friends") }) }) { pad ->
+                  Centered(Modifier.padding(pad)) {
+                      Column(
+                          Modifier.verticalScroll(rememberScrollState()).padding(16.dp),
+                          verticalArrangement = Arrangement.spacedBy(12.dp),
+                      ) {
+                          SectionCard("Compete with friends") {
+                              Text(
+                                  "Add friends and run step challenges through your own Feynos Fit server. Only your display name and daily step totals are shared — never food, weight or other health data.",
+                                  style = MaterialTheme.typography.bodyMedium,
+                              )
+                          }
+                          ElevatedCard(Modifier.fillMaxWidth()) {
+                              Column {
+                                  TabRow(selectedTabIndex = tab) {
+                                      Tab(selected = tab == 0, onClick = { tab = 0; error = null }, text = { Text("Sign in") })
+                                      Tab(selected = tab == 1, onClick = { tab = 1; error = null }, text = { Text("Create account") })
+                                  }
+                                  Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                      OutlinedTextField(
+                                          server, { server = it }, Modifier.fillMaxWidth(),
+                                          label = { Text("Server address") },
+                                          placeholder = { Text("https://fit.example.com") },
+                                          singleLine = true,
+                                          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                                      )
+                                      if (tab == 1) {
+                                          OutlinedTextField(invite, { invite = it }, Modifier.fillMaxWidth(), label = { Text("Server invite code") }, singleLine = true)
+                                          OutlinedTextField(display, { display = it }, Modifier.fillMaxWidth(), label = { Text("Display name (what friends see)") }, singleLine = true)
+                                      }
+                                      OutlinedTextField(
+                                          username, { username = it.trim() }, Modifier.fillMaxWidth(),
+                                          label = { Text("Username") }, singleLine = true,
+                                      )
+                                      OutlinedTextField(
+                                          password, { password = it }, Modifier.fillMaxWidth(),
+                                          label = { Text(if (tab == 1) "Password (8+ characters)" else "Password") },
+                                          singleLine = true,
+                                          visualTransformation = PasswordVisualTransformation(),
+                                          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                                      )
+                                      error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                                      if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                                      val ready = server.isNotBlank() && username.length >= 3 && password.isNotEmpty() &&
+                                          (tab == 0 || (invite.isNotBlank() && display.isNotBlank() && password.length >= 8))
+                                      Button(onClick = { submit() }, enabled = ready && !busy, modifier = Modifier.fillMaxWidth()) {
+                                          Text(if (tab == 0) "Sign in" else "Create account")
+                                      }
+                                  }
+                              }
+                          }
+                          Text(
+                              "Don't have a server yet? The repo's server folder has a Docker setup that runs on any home server. Ask whoever runs it for the address and invite code.",
+                              style = MaterialTheme.typography.bodySmall,
+                              color = MaterialTheme.colorScheme.onSurfaceVariant,
+                          )
+                      }
+                  }
+              }
+          }
+
+          // ================================================================ signed in
+
+          @Composable
+          private fun SocialHome(onSignedOut: () -> Unit) {
+              val ctx = LocalContext.current
+              val scope = rememberCoroutineScope()
+              var info by remember { mutableStateOf<Social.FriendsInfo?>(null) }
+              var challenges by remember { mutableStateOf<List<Social.Challenge>>(emptyList()) }
+              var loading by remember { mutableStateOf(false) }
+              var error by remember { mutableStateOf<String?>(null) }
+              var menu by remember { mutableStateOf(false) }
+              var showNew by remember { mutableStateOf(false) }
+              var confirm by remember { mutableStateOf<Pair<String, () -> Unit>?>(null) }
+              var deleting by remember { mutableStateOf(false) }
+              var renaming by remember { mutableStateOf(false) }
+
+              fun refresh() {
+                  loading = true
+                  scope.launch {
+                      val r = io {
+                          runCatching { Social.pushSteps(ctx) }
+                          Social.friends(ctx) to Social.challenges(ctx)
+                      }
+                      loading = false
+                      r.onSuccess { (f, c) ->
+                          info = f
+                          challenges = c
+                          error = null
+                      }.onFailure {
+                          if (Social.session(ctx) == null) onSignedOut() else error = it.friendly()
+                      }
+                  }
+              }
+
+              /** Runs a server action, then refreshes. */
+              fun act(done: String? = null, block: () -> Unit) {
+                  scope.launch {
+                      io(block).onSuccess {
+                          if (done != null) Toast.makeText(ctx, done, Toast.LENGTH_SHORT).show()
+                          refresh()
+                      }.onFailure { Toast.makeText(ctx, it.friendly(), Toast.LENGTH_LONG).show() }
+                  }
+              }
+
+              LaunchedEffect(Unit) { refresh() }
+              val session = Social.session(ctx)
+
+              Scaffold(
+                  topBar = {
+                      TopAppBar(
+                          title = { Text("Friends") },
+                          actions = {
+                              IconButton(onClick = { refresh() }, enabled = !loading) { Icon(Icons.Filled.Refresh, contentDescription = "Refresh") }
+                              Box {
+                                  IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "Account") }
+                                  DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                      DropdownMenuItem(text = { Text("Change display name") }, onClick = { menu = false; renaming = true })
+                                      DropdownMenuItem(text = { Text("Sign out") }, onClick = {
+                                          menu = false
+                                          scope.launch {
+                                              io { Social.logout(ctx) }
+                                              onSignedOut()
+                                          }
+                                      })
+                                      DropdownMenuItem(text = { Text("Delete my account", color = MaterialTheme.colorScheme.error) }, onClick = {
+                                          menu = false
+                                          deleting = true
+                                      })
+                                  }
+                              }
+                          },
+                      )
+                  },
+              ) { pad ->
+                  Centered(Modifier.padding(pad)) {
+                      LazyColumn(
+                          contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 32.dp),
+                          verticalArrangement = Arrangement.spacedBy(12.dp),
+                      ) {
+                          if (loading) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+                          error?.let { msg ->
+                              item {
+                                  SectionCard {
+                                      Text(msg, color = MaterialTheme.colorScheme.error)
+                                      TextButton(onClick = { refresh() }) { Text("Try again") }
+                                  }
+                              }
+                          }
+                          item { MeCard(session, info) }
+                          item {
+                              AddFriendCard { code ->
+                                  scope.launch {
+                                      io { Social.addFriend(ctx, code) }.onSuccess { r ->
+                                          val msg = when (r) {
+                                              "accepted" -> "You're now friends!"
+                                              "already_friends" -> "You're already friends"
+                                              else -> "Friend request sent"
+                                          }
+                                          Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+                                          refresh()
+                                      }.onFailure { Toast.makeText(ctx, it.friendly(), Toast.LENGTH_LONG).show() }
+                                  }
+                              }
+                          }
+
+                          val inc = info?.incoming.orEmpty()
+                          if (inc.isNotEmpty()) {
+                              item { ListHeader("Friend requests") }
+                              items(inc) { p ->
+                                  ElevatedCard(Modifier.fillMaxWidth()) {
+                                      Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                          Avatar(p.displayName)
+                                          Spacer(Modifier.width(12.dp))
+                                          Column(Modifier.weight(1f)) {
+                                              Text(p.displayName, fontWeight = FontWeight.SemiBold)
+                                              Text("@${p.username}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                          }
+                                          TextButton(onClick = { act { Social.removeFriend(ctx, p.id) } }) { Text("Decline") }
+                                          Button(onClick = { act("You're now friends!") { Social.acceptFriend(ctx, p.id) } }) { Text("Accept") }
+                                      }
+                                  }
+                              }
+                          }
+
+                          item {
+                              Row(verticalAlignment = Alignment.CenterVertically) {
+                                  Text("Challenges", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                                  FilledTonalButton(onClick = { showNew = true }, enabled = info?.friends?.isNotEmpty() == true) {
+                                      Icon(Icons.Filled.Add, contentDescription = null)
+                                      Spacer(Modifier.width(4.dp))
+                                      Text("New")
+                                  }
+                              }
+                          }
+                          if (challenges.isEmpty()) {
+                              item {
+                                  Text(
+                                      if (info?.friends.isNullOrEmpty()) "Add a friend first, then start a challenge." else "No challenges yet. Start one — a weekend step race is a good first one.",
+                                      style = MaterialTheme.typography.bodyMedium,
+                                      color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                  )
+                              }
+                          }
+                          items(challenges, key = { it.id }) { c ->
+                              ChallengeCard(
+                                  c = c,
+                                  myId = info?.me?.person?.id ?: "",
+                                  onJoin = { act("Joined!") { Social.joinChallenge(ctx, c.id) } },
+                                  onDecline = { act { Social.leaveChallenge(ctx, c.id) } },
+                                  onLeave = { confirm = "Leave \"${c.name}\"?" to { act { Social.leaveChallenge(ctx, c.id) } } },
+                                  onDelete = { confirm = "Delete \"${c.name}\" for everyone?" to { act { Social.deleteChallenge(ctx, c.id) } } },
+                              )
+                          }
+
+                          item { ListHeader("Friends") }
+                          val friends = info?.friends.orEmpty()
+                          if (friends.isEmpty() && info != null) {
+                              item {
+                                  Text(
+                                      "No friends yet. Share your friend code above, or enter theirs.",
+                                      style = MaterialTheme.typography.bodyMedium,
+                                      color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                  )
+                              }
+                          }
+                          items(friends, key = { it.person.id }) { f ->
+                              FriendRow(f) { confirm = "Remove ${f.person.displayName} from your friends?" to { act { Social.removeFriend(ctx, f.person.id) } } }
+                          }
+                          val out = info?.outgoing.orEmpty()
+                          if (out.isNotEmpty()) {
+                              item { ListHeader("Waiting for them to accept") }
+                              items(out) { p ->
+                                  Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                      Avatar(p.displayName)
+                                      Spacer(Modifier.width(12.dp))
+                                      Text(p.displayName, modifier = Modifier.weight(1f))
+                                      TextButton(onClick = { act { Social.removeFriend(ctx, p.id) } }) { Text("Cancel") }
+                                  }
+                              }
+                          }
+                          item {
+                              Text(
+                                  "Steps upload each time you open the app or refresh this screen. Connected to ${session?.server?.removePrefix("https://") ?: ""}.",
+                                  style = MaterialTheme.typography.bodySmall,
+                                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                              )
+                          }
+                      }
+                  }
+              }
+
+              if (showNew) {
+                  NewChallengeDialog(info?.friends.orEmpty(), onDismiss = { showNew = false }) { name, start, end, ids ->
+                      showNew = false
+                      act("Challenge started!") { Social.createChallenge(ctx, name, start, end, ids) }
+                  }
+              }
+              confirm?.let { (text, action) ->
+                  ConfirmDialog(title = text, text = "", confirmLabel = "Yes", onConfirm = { confirm = null; action() }, onDismiss = { confirm = null })
+              }
+              if (renaming) {
+                  var name by remember { mutableStateOf(session?.displayName ?: "") }
+                  AlertDialog(
+                      onDismissRequest = { renaming = false },
+                      title = { Text("Display name") },
+                      text = { OutlinedTextField(name, { name = it }, singleLine = true, label = { Text("What friends see") }) },
+                      confirmButton = {
+                          TextButton(enabled = name.isNotBlank(), onClick = { renaming = false; act("Saved") { Social.rename(ctx, name.trim()) } }) { Text("Save") }
+                      },
+                      dismissButton = { TextButton(onClick = { renaming = false }) { Text("Cancel") } },
+                  )
+              }
+              if (deleting) {
+                  var pw by remember { mutableStateOf("") }
+                  var err by remember { mutableStateOf<String?>(null) }
+                  AlertDialog(
+                      onDismissRequest = { deleting = false },
+                      title = { Text("Delete your account?") },
+                      text = {
+                          Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                              Text("This removes your account, friends and challenge history from the server. Your diary on this phone isn't affected.")
+                              OutlinedTextField(pw, { pw = it }, singleLine = true, label = { Text("Password") }, visualTransformation = PasswordVisualTransformation())
+                              err?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                          }
+                      },
+                      confirmButton = {
+                          TextButton(enabled = pw.isNotEmpty(), onClick = {
+                              scope.launch {
+                                  io { Social.deleteAccount(ctx, pw) }
+                                      .onSuccess { deleting = false; onSignedOut() }
+                                      .onFailure { err = it.friendly() }
+                              }
+                          }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+                      },
+                      dismissButton = { TextButton(onClick = { deleting = false }) { Text("Cancel") } },
+                  )
+              }
+          }
+
+          @Composable
+          private fun MeCard(session: Social.Session?, info: Social.FriendsInfo?) {
+              val ctx = LocalContext.current
+              val code = session?.friendCode.orEmpty()
+              val pretty = if (code.length == 8) code.substring(0, 4) + "-" + code.substring(4) else code
+              SectionCard(session?.displayName ?: "You") {
+                  info?.let {
+                      Text("${it.me.today.grouped()} steps today · ${it.me.week.grouped()} this week", style = MaterialTheme.typography.bodyMedium)
+                  }
+                  Row(verticalAlignment = Alignment.CenterVertically) {
+                      Column(Modifier.weight(1f)) {
+                          Text("Your friend code", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                          Text(pretty, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                      }
+                      TextButton(onClick = {
+                          val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                          cm?.setPrimaryClip(ClipData.newPlainText("Feynos Fit friend code", code))
+                          Toast.makeText(ctx, "Copied", Toast.LENGTH_SHORT).show()
+                      }) { Text("Copy") }
+                      Button(onClick = {
+                          val text = "Add me on Feynos Fit! My friend code is $pretty" +
+                              (session?.server?.let { "\nServer: $it" } ?: "")
+                          val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
+                          runCatching { ctx.startActivity(Intent.createChooser(send, "Share friend code")) }
+                      }) { Text("Share") }
+                  }
+              }
+          }
+
+          @Composable
+          private fun AddFriendCard(onAdd: (String) -> Unit) {
+              var code by remember { mutableStateOf("") }
+              SectionCard("Add a friend") {
+                  Row(verticalAlignment = Alignment.CenterVertically) {
+                      OutlinedTextField(
+                          code, { v -> code = v.uppercase().filter { it.isLetterOrDigit() || it == '-' }.take(9) },
+                          Modifier.weight(1f),
+                          label = { Text("Their friend code") },
+                          singleLine = true,
+                      )
+                      Spacer(Modifier.width(8.dp))
+                      Button(onClick = { onAdd(code); code = "" }, enabled = code.count { it.isLetterOrDigit() } == 8) { Text("Add") }
+                  }
+              }
+          }
+
+          @Composable
+          private fun Avatar(name: String) {
+              Box(
+                  Modifier.size(36.dp).background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
+                  contentAlignment = Alignment.Center,
+              ) {
+                  Text(
+                      name.trim().firstOrNull()?.uppercase() ?: "?",
+                      color = MaterialTheme.colorScheme.onPrimaryContainer,
+                      fontWeight = FontWeight.Bold,
+                  )
+              }
+          }
+
+          @Composable
+          private fun FriendRow(f: Social.Friend, onRemove: () -> Unit) {
+              var menu by remember { mutableStateOf(false) }
+              ElevatedCard(Modifier.fillMaxWidth()) {
+                  Row(Modifier.padding(start = 12.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                      Avatar(f.person.displayName)
+                      Spacer(Modifier.width(12.dp))
+                      Column(Modifier.weight(1f)) {
+                          Text(f.person.displayName, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                          Text("${f.week.grouped()} steps this week", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                      }
+                      Column(horizontalAlignment = Alignment.End) {
+                          Text(f.today.grouped(), fontWeight = FontWeight.Bold)
+                          Text("today", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                      }
+                      Box {
+                          IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "Options") }
+                          DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                              DropdownMenuItem(text = { Text("Remove friend") }, onClick = { menu = false; onRemove() })
+                          }
+                      }
+                  }
+              }
+          }
+
+          private fun prettyRange(start: String, end: String): String {
+              val f = DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
+              val s = LocalDate.parse(start)
+              val e = LocalDate.parse(end)
+              return if (s == e) s.format(f) else "${s.format(f)} – ${e.format(f)}"
+          }
+
+          @Composable
+          private fun ChallengeCard(
+              c: Social.Challenge,
+              myId: String,
+              onJoin: () -> Unit,
+              onDecline: () -> Unit,
+              onLeave: () -> Unit,
+              onDelete: () -> Unit,
+          ) {
+              var menu by remember { mutableStateOf(false) }
+              ElevatedCard(Modifier.fillMaxWidth()) {
+                  Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                      Row(verticalAlignment = Alignment.CenterVertically) {
+                          Column(Modifier.weight(1f)) {
+                              Text(c.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                              val state = when (c.state) {
+                                  "active" -> {
+                                      val left = LocalDate.parse(Dates.today()).until(LocalDate.parse(c.end)).days
+                                      if (left == 0) "Last day!" else "$left day${if (left == 1) "" else "s"} left"
+                                  }
+                                  "upcoming" -> "Starts ${prettyRange(c.start, c.start)}"
+                                  else -> "Finished"
+                              }
+                              Text(
+                                  "${prettyRange(c.start, c.end)} · $state",
+                                  style = MaterialTheme.typography.bodySmall,
+                                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                              )
+                          }
+                          if (c.myStatus == "joined") {
+                              Box {
+                                  IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "Challenge options") }
+                                  DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                      DropdownMenuItem(text = { Text("Leave challenge") }, onClick = { menu = false; onLeave() })
+                                      if (c.creatorId == myId) {
+                                          DropdownMenuItem(text = { Text("Delete challenge") }, onClick = { menu = false; onDelete() })
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                      if (c.myStatus == "invited") {
+                          Text("${c.creatorName} invited you.", style = MaterialTheme.typography.bodyMedium)
+                          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                              Button(onClick = onJoin) { Text("Join") }
+                              OutlinedButton(onClick = onDecline) { Text("No thanks") }
+                          }
+                      }
+                      val leader = c.leaderboard.firstOrNull()?.total ?: 0
+                      c.leaderboard.forEachIndexed { i, s ->
+                          if (i > 0) HorizontalDivider()
+                          val mine = s.person.id == myId
+                          Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                              Box(Modifier.width(28.dp), contentAlignment = Alignment.Center) {
+                                  if (i == 0 && leader > 0) {
+                                      Icon(Icons.Filled.Star, contentDescription = "Leader", tint = androidx.compose.ui.graphics.Color(0xFFF2B01E))
+                                  } else {
+                                      Text("${i + 1}", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                  }
+                              }
+                              Spacer(Modifier.width(8.dp))
+                              Column(Modifier.weight(1f)) {
+                                  Text(
+                                      if (mine) "${s.person.displayName} (you)" else s.person.displayName,
+                                      fontWeight = if (mine) FontWeight.Bold else FontWeight.Normal,
+                                      maxLines = 1,
+                                      overflow = TextOverflow.Ellipsis,
+                                  )
+                                  if (c.state == "active") {
+                                      Text("${s.today.grouped()} today", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                  }
+                              }
+                              Text(s.total.grouped(), fontWeight = FontWeight.Bold)
+                          }
+                          if (leader > 0) {
+                              LinearProgressIndicator(
+                                  progress = { (s.total.toFloat() / leader).coerceIn(0f, 1f) },
+                                  modifier = Modifier.fillMaxWidth().padding(start = 36.dp).height(4.dp),
+                              )
+                          }
+                      }
+                      if (c.invited.isNotEmpty()) {
+                          Text(
+                              "Invited: " + c.invited.joinToString { it.displayName },
+                              style = MaterialTheme.typography.bodySmall,
+                              color = MaterialTheme.colorScheme.onSurfaceVariant,
+                          )
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          private fun NewChallengeDialog(
+              friends: List<Social.Friend>,
+              onDismiss: () -> Unit,
+              onCreate: (String, String, String, List<String>) -> Unit,
+          ) {
+              val today = LocalDate.now()
+              val saturday = today.with(java.time.temporal.TemporalAdjusters.nextOrSame(DayOfWeek.SATURDAY))
+              val presets = listOf(
+                  Triple("Today", today, today),
+                  Triple("This weekend", saturday, saturday.plusDays(1)),
+                  Triple("Next 7 days", today, today.plusDays(6)),
+                  Triple("Next 30 days", today, today.plusDays(29)),
+              )
+              var preset by remember { mutableIntStateOf(2) }
+              var name by remember { mutableStateOf("") }
+              var picked by remember { mutableStateOf(friends.map { it.person.id }.toSet()) }
+              AlertDialog(
+                  onDismissRequest = onDismiss,
+                  title = { Text("New step challenge") },
+                  text = {
+                      Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                          OutlinedTextField(
+                              name, { name = it.take(60) }, Modifier.fillMaxWidth(),
+                              label = { Text("Name") }, placeholder = { Text(presets[preset].first + " step race") }, singleLine = true,
+                          )
+                          ChoiceRow(presets.map { it.first }, preset) { preset = it }
+                          Text(prettyRange(presets[preset].second.toString(), presets[preset].third.toString()), style = MaterialTheme.typography.bodySmall)
+                          Text("Invite", style = MaterialTheme.typography.labelLarge)
+                          friends.forEach { f ->
+                              Row(
+                                  Modifier.fillMaxWidth().clickable {
+                                      picked = if (f.person.id in picked) picked - f.person.id else picked + f.person.id
+                                  },
+                                  verticalAlignment = Alignment.CenterVertically,
+                              ) {
+                                  Checkbox(checked = f.person.id in picked, onCheckedChange = {
+                                      picked = if (it) picked + f.person.id else picked - f.person.id
+                                  })
+                                  Text(f.person.displayName)
+                              }
+                          }
+                      }
+                  },
+                  confirmButton = {
+                      TextButton(enabled = picked.isNotEmpty(), onClick = {
+                          val p = presets[preset]
+                          onCreate(name.trim().ifBlank { p.first + " step race" }, p.second.toString(), p.third.toString(), picked.toList())
+                      }) { Text("Start") }
+                  },
+                  dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+              )
           }
           FEYNOS_EOF
 
