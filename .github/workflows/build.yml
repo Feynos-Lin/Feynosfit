@@ -18,7 +18,7 @@ permissions:
   contents: write
 
 env:
-  APP_VERSION: "0.6"
+  APP_VERSION: "0.6.1"
 
 jobs:
   build:
@@ -81,7 +81,7 @@ jobs:
                   minSdk = 26
                   targetSdk = 34
                   versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-                  versionName = System.getenv("APP_VERSION") ?: "0.6"
+                  versionName = System.getenv("APP_VERSION") ?: "0.6.1"
               }
 
               signingConfigs {
@@ -1774,11 +1774,21 @@ jobs:
                   val nm = p.optJSONObject("nutriments") ?: return null
                   fun g(k: String): Double = nm.optDouble(k, 0.0).safe()
 
-                  var kcal = g("energy-kcal_100g")
-                  if (kcal <= 0) kcal = g("energy_100g") / 4.184
+                  val sq = p.optDouble("serving_quantity", 0.0).safe()
                   val protein = g("proteins_100g")
                   val carbs = g("carbohydrates_100g")
                   val fat = g("fat_100g")
+
+                  // Some entries are missing the calorie figure. Try, in order: kcal per 100 g,
+                  // kJ per 100 g, the per-serving figures scaled to 100 g, and finally an estimate
+                  // from the macros (4 kcal/g protein and carbs, 9 kcal/g fat).
+                  var kcal = g("energy-kcal_100g")
+                  if (kcal <= 0) kcal = g("energy_100g") / 4.184
+                  if (kcal <= 0 && sq > 0) {
+                      val perServing = g("energy-kcal_serving").takeIf { it > 0 } ?: (g("energy_serving") / 4.184)
+                      kcal = perServing * 100.0 / sq
+                  }
+                  if (kcal <= 0) kcal = 4 * protein + 4 * carbs + 9 * fat
                   if (kcal <= 0 && protein + carbs + fat <= 0) return null
 
                   val per100 = Nutrients(
@@ -1787,7 +1797,6 @@ jobs:
                       sodiumMg = g("sodium_100g") * 1000, cholesterolMg = g("cholesterol_100g") * 1000,
                       potassiumMg = g("potassium_100g") * 1000,
                   )
-                  val sq = p.optDouble("serving_quantity", 0.0).safe()
                   val grams = if (sq > 0) sq else 100.0
                   val sizeText = p.optString("serving_size", "").trim()
                   val desc = when {
