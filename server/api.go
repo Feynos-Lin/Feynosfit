@@ -35,6 +35,8 @@ type API struct {
 	authIP   *limiter // login/register attempts per client IP
 	failUser *limiter // failed logins per username
 	friendIP *limiter // friend-code lookups per user (stops code guessing)
+	foodUser *limiter // food searches per user (protects the FatSecret quota)
+	food     *FatSecret
 	now      func() time.Time
 }
 
@@ -45,6 +47,8 @@ func NewAPI(store *Store, cfg Config) *API {
 		authIP:   newLimiter(30, 10*time.Minute),
 		failUser: newLimiter(10, 15*time.Minute),
 		friendIP: newLimiter(20, 10*time.Minute),
+		foodUser: newLimiter(120, 10*time.Minute),
+		food:     NewFatSecret(store),
 		now:      time.Now,
 	}
 }
@@ -70,6 +74,7 @@ func (a *API) Routes() http.Handler {
 	m.HandleFunc("POST /api/v1/challenges/{id}/join", a.auth(a.joinChallenge))
 	m.HandleFunc("POST /api/v1/challenges/{id}/leave", a.auth(a.leaveChallenge))
 	m.HandleFunc("DELETE /api/v1/challenges/{id}", a.auth(a.deleteChallenge))
+	m.HandleFunc("GET /api/v1/foods/search", a.auth(a.searchFoods))
 	return secureHeaders(m)
 }
 
@@ -259,7 +264,7 @@ func sumSteps(u *User, start, end string) int {
 // ---------------------------------------------------------------- handlers: account
 
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "feynos-fit", "version": version, "signup": a.signupOpen()})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "feynos-fit", "version": version, "signup": a.signupOpen(), "foodSearch": a.food.Enabled()})
 }
 
 type authResponse struct {
@@ -872,4 +877,29 @@ func (a *API) deleteChallenge(w http.ResponseWriter, r *http.Request, u *User, _
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// ---------------------------------------------------------------- food search
+
+func (a *API) searchFoods(w http.ResponseWriter, r *http.Request, u *User, _ string) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if utf8.RuneCountInString(q) > 100 {
+		writeErr(w, fail(http.StatusBadRequest, "That search is too long"))
+		return
+	}
+	if !a.food.Enabled() {
+		writeErr(w, fail(http.StatusServiceUnavailable, "Fast-food search isn't set up on this server"))
+		return
+	}
+	if !a.foodUser.Allow("u:" + u.ID) {
+		writeErr(w, fail(http.StatusTooManyRequests, "Too many food searches. Try again in a few minutes."))
+		return
+	}
+	hits, err := a.food.Search(r.Context(), q)
+	if err != nil {
+		log.Printf("food search: %v", err)
+		writeErr(w, fail(http.StatusBadGateway, "Fast-food search isn't working right now"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"foods": hits, "attribution": "Powered by fatsecret"})
 }

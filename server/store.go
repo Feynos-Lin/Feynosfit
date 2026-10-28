@@ -66,6 +66,10 @@ type Data struct {
 	AdminPassHash  string `json:"adminPassHash,omitempty"`
 	AdminSetupCode string `json:"adminSetupCode,omitempty"` // needed once, to create the admin password
 	SignupOpen     *bool  `json:"signupOpen,omitempty"`     // set from the panel; overrides ALLOW_SIGNUP
+
+	// FatSecret food search, set from the panel (FATSECRET_CLIENT_ID/_SECRET override these)
+	FatSecretID     string `json:"fatSecretId,omitempty"`
+	FatSecretSecret string `json:"fatSecretSecret,omitempty"`
 }
 
 type Store struct {
