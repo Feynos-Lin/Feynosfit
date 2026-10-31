@@ -1,6 +1,7 @@
 # Feynos Fit friends & challenges server
 #
-#   docker compose up -d --build                              # start / update
+#   docker compose up -d                                      # start
+#   docker compose pull; docker compose up -d                 # update to the newest image
 #   docker exec feynos-fit-server /feynos-server signup-code  # invite code for new accounts
 #   docker logs feynos-fit-server                             # logs
 #   http://<server-ip>:8097                                   # web admin panel (home network only)
@@ -10,8 +11,8 @@
 
 services:
   feynos-fit:
-    build: .
-    image: feynos-fit-server:latest
+    image: ghcr.io/feynos-lin/feynosfit-server:latest
+    # To build from this folder's source instead, replace the line above with: build: .
     container_name: feynos-fit-server
     restart: unless-stopped
     ports:

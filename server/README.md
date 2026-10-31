@@ -9,55 +9,42 @@ totals, and challenges. Food, weight and health data never leave the phone.
 
 ## 1. Start it
 
-### Windows (PowerShell, no Git needed)
-
-Needs Docker Desktop. Run one line at a time:
-
-```powershell
-cd $HOME
-Invoke-WebRequest https://github.com/Feynos-Lin/Feynosfit/archive/refs/heads/main.zip -OutFile Feynosfit.zip
-Expand-Archive Feynosfit.zip -DestinationPath . -Force
-cd Feynosfit-main\server
-docker compose up -d --build
-docker exec feynos-fit-server /feynos-server signup-code
-docker exec feynos-fit-server /feynos-server admin-setup-code
-```
-
-To update later, run the same lines again. Your data lives in a Docker volume, so
-re-downloading the files doesn't touch it.
+The server is published as a ready-made Docker image, `ghcr.io/feynos-lin/feynosfit-server`
+(for normal PCs and ARM boards like a Raspberry Pi). You only need a compose file, not the
+source code.
 
 ### Already have a main compose.yaml that includes each app?
 
-Clone (or unzip) the repo next to your other app folders, then add one line to your main
-`compose.yaml`:
+Make a `Feynosfit` folder next to your other app folders and save the repo's root
+[`compose.yaml`](../compose.yaml) in it. Add one line to your main `compose.yaml`:
 
 ```yaml
 include:
   - Feynosfit/compose.yaml
 ```
 
-Run `docker compose up -d --build` from the folder with your main file. The repo's root
-`compose.yaml` builds from `server/` and keeps its data in a volume named
-`feynos-fit-data`. If nginx runs in the same compose setup, proxy your hostname to
-`http://feynos-fit:8095`.
+Then, from the folder with your main file:
 
-### Linux / macOS
-
-Needs Docker with the compose plugin:
-
-```sh
-git clone https://github.com/Feynos-Lin/Feynosfit.git
-cd Feynosfit/server
-docker compose up -d --build
+```powershell
+docker compose up -d
+docker exec feynos-fit-server /feynos-server signup-code
+docker exec feynos-fit-server /feynos-server admin-setup-code
 ```
 
-Get the **invite code** people need to create an account:
+It keeps its data in a Docker volume named `feynos-fit-data`. If nginx runs in the same
+compose setup, proxy your hostname to `http://feynos-fit:8095`.
+
+### On its own
+
+Save [`docker-compose.yml`](docker-compose.yml) in an empty folder and run `docker compose up -d`
+there, then get the invite code:
 
 ```sh
 docker exec feynos-fit-server /feynos-server signup-code
 ```
 
-The server now listens on `http://127.0.0.1:8095`, reachable only from the server itself.
+That file publishes the API on `127.0.0.1:8095`, so only the server itself can reach it.
+Opening `http://<server>:8095/` in a browser shows "Feynos Fit server … is running".
 
 ## 2. Make it reachable over HTTPS
 
@@ -167,11 +154,15 @@ used the panel's switch, it takes priority over `ALLOW_SIGNUP`.
 
 ## Update
 
-Windows: repeat the PowerShell lines in step 1. Linux / macOS:
+From the folder with your compose file (your main one, if you use `include:`):
 
 ```sh
-cd Feynosfit && git pull && cd server && docker compose up -d --build
+docker compose pull feynos-fit
+docker compose up -d
 ```
+
+Your data lives in the Docker volume, so updating never touches it. New images are published
+automatically whenever the server code changes.
 
 ## Back up
 

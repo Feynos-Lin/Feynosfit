@@ -55,6 +55,7 @@ func NewAPI(store *Store, cfg Config) *API {
 
 func (a *API) Routes() http.Handler {
 	m := http.NewServeMux()
+	m.HandleFunc("GET /{$}", a.home)
 	m.HandleFunc("GET /api/v1/health", a.health)
 	m.HandleFunc("POST /api/v1/register", a.register)
 	m.HandleFunc("POST /api/v1/login", a.login)
@@ -262,6 +263,11 @@ func sumSteps(u *User, start, end string) int {
 }
 
 // ---------------------------------------------------------------- handlers: account
+
+func (a *API) home(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte("Feynos Fit server " + version + " is running.\n\nEnter this address in the app's Friends tab. The admin panel is on port 8097 from your home network.\n"))
+}
 
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "feynos-fit", "version": version, "signup": a.signupOpen(), "foodSearch": a.food.Enabled()})

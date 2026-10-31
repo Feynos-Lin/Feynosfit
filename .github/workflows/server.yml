@@ -1,4 +1,6 @@
-# Tests the friends & challenges server and checks its Docker image builds and runs.
+# Tests the friends & challenges server, then publishes its Docker image:
+#   ghcr.io/feynos-lin/feynosfit-server:latest   (and :<version>, e.g. :1.3.0)
+# Your compose file pulls that image, so updating is `docker compose pull` + `up -d`.
 name: Server
 
 on:
@@ -8,6 +10,13 @@ on:
   pull_request:
     paths: ["server/**"]
   workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/feynos-lin/feynosfit-server
 
 jobs:
   test:
@@ -31,7 +40,7 @@ jobs:
         run: go test -count=1 -race ./...
 
       - name: Build Docker image
-        run: docker compose build
+        run: docker build -t "$IMAGE:latest" .
 
       - name: Smoke-test the container
         run: |
@@ -42,6 +51,7 @@ jobs:
             sleep 2
           done
           docker inspect -f 'health={{.State.Health.Status}}' feynos-fit-server
+          curl -fsS http://127.0.0.1:8095/ | grep -q "is running"
           curl -fsS http://127.0.0.1:8095/api/v1/health
           CODE=$(docker exec feynos-fit-server /feynos-server signup-code)
           curl -fsS -X POST http://127.0.0.1:8095/api/v1/register \
@@ -57,3 +67,43 @@ jobs:
       - name: Logs
         if: always()
         run: docker compose logs
+
+  publish:
+    name: Publish image
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read server version
+        id: v
+        run: echo "version=$(sed -n 's/^var version = "\(.*\)"/\1/p' server/main.go)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: server
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ steps.v.outputs.version }}
+
+      - name: Check anyone can pull it
+        run: |
+          docker logout ghcr.io
+          if docker pull -q "$IMAGE:${{ steps.v.outputs.version }}"; then
+            echo "::notice title=Image published::$IMAGE:${{ steps.v.outputs.version }} is public."
+          else
+            echo "::warning title=Image is private::Make the package public: GitHub > your profile > Packages > feynosfit-server > Package settings > Change visibility > Public."
+          fi

@@ -5,15 +5,18 @@
 #   include:
 #     - Feynosfit/compose.yaml
 #
-# then run `docker compose up -d --build` from the folder with your main compose.yaml.
+# then run `docker compose up -d` from the folder with your main compose.yaml.
+# To update to the newest server later:
+#   docker compose pull feynos-fit
+#   docker compose up -d
 # Get the codes you need with:
 #   docker exec feynos-fit-server /feynos-server signup-code       (app invite code)
 #   docker exec feynos-fit-server /feynos-server admin-setup-code  (web admin panel)
 
 services:
   feynos-fit:
-    build: ./server
-    image: feynos-fit-server:latest
+    image: ghcr.io/feynos-lin/feynosfit-server:latest
+    # To build from the source in ./server instead, replace the line above with: build: ./server
     container_name: feynos-fit-server
     restart: unless-stopped
     ports:
