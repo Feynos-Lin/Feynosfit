@@ -18,7 +18,7 @@ permissions:
   contents: write
 
 env:
-  APP_VERSION: "0.7"
+  APP_VERSION: "0.7.1"
 
 jobs:
   build:
@@ -81,7 +81,7 @@ jobs:
                   minSdk = 26
                   targetSdk = 34
                   versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-                  versionName = System.getenv("APP_VERSION") ?: "0.7"
+                  versionName = System.getenv("APP_VERSION") ?: "0.7.1"
               }
 
               signingConfigs {
@@ -3095,7 +3095,12 @@ jobs:
                       if (code !in 200..299) {
                           val msg = runCatching { JSONObject(text).optString("error") }.getOrNull()?.takeIf { it.isNotBlank() }
                               ?: when (code) {
-                                  in 300..399 -> "The server redirected the request. Check the address (use the https:// one)."
+                                  in 300..399 -> {
+                                      val to = c.getHeaderField("Location")?.takeIf { it.isNotBlank() }
+                                      "The server redirected the request ($code)" +
+                                          (if (to != null) " to $to" else "") +
+                                          ". This usually comes from the reverse proxy or Cloudflare, not the Feynos Fit server."
+                                  }
                                   404 -> "No Feynos Fit server found at that address"
                                   502, 503, 504 -> "The server isn't responding. Is the container running?"
                                   else -> "Server error ($code)"
